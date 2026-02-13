@@ -528,13 +528,17 @@ def fetch_symbol_prices_stooq(
     *,
     symbol: str,
     max_rows: int | None,
-) -> tuple[int, str | None]:
+) -> tuple[int, str | None, bool]:
     for variant in stooq_symbol_variants(symbol):
         url = STOOQ_DAILY_URL_TMPL.format(symbol=variant)
         response = session.get(url, timeout=45)
+        if response.status_code == 429:
+            return 0, None, True
         if response.status_code != 200:
             continue
         body = response.text.strip()
+        if "Exceeded the daily hits limit" in body:
+            return 0, None, True
         if not body or body.startswith("No data"):
             continue
         reader = csv.DictReader(body.splitlines())
@@ -553,8 +557,8 @@ def fetch_symbol_prices_stooq(
             continue
         if max_rows is not None and max_rows > 0:
             parsed = parsed[-max_rows:]
-        return len(parsed), body
-    return 0, None
+        return len(parsed), body, False
+    return 0, None, False
 
 
 def persist_symbol_prices(
@@ -604,16 +608,32 @@ def fetch_prices_stooq(
     max_rows_per_symbol: int,
     request_delay: float,
 ) -> dict[str, Any]:
-    selected_symbols = symbols[:symbol_limit] if symbol_limit > 0 else symbols
+    existing = {
+        normalize_symbol(row["symbol"])
+        for row in conn.execute(
+            "SELECT DISTINCT symbol FROM daily_prices WHERE source = 'stooq'"
+        ).fetchall()
+    }
+    missing_symbols = [normalize_symbol(sym) for sym in symbols if normalize_symbol(sym) not in existing]
+    existing_symbols = [normalize_symbol(sym) for sym in symbols if normalize_symbol(sym) in existing]
+    ordered_symbols = missing_symbols + existing_symbols
+
+    selected_symbols = ordered_symbols[:symbol_limit] if symbol_limit > 0 else ordered_symbols
     inserted_rows = 0
     failures = []
+    rate_limited = False
+    rate_limit_symbol: str | None = None
 
     for idx, symbol in enumerate(selected_symbols, start=1):
-        count, body = fetch_symbol_prices_stooq(
+        count, body, limited = fetch_symbol_prices_stooq(
             session,
             symbol=symbol,
             max_rows=max_rows_per_symbol if max_rows_per_symbol > 0 else None,
         )
+        if limited:
+            rate_limited = True
+            rate_limit_symbol = symbol
+            break
         if count == 0 or body is None:
             failures.append(symbol)
         else:
@@ -628,11 +648,13 @@ def fetch_prices_stooq(
 
     conn.commit()
     return {
-        "status": "success",
+        "status": "rate_limited" if rate_limited else "success",
         "symbols_requested": len(selected_symbols),
+        "symbols_processed": idx if selected_symbols else 0,
         "rows_written": inserted_rows,
         "symbol_failures": len(failures),
         "failed_symbols": failures[:20],
+        "rate_limit_symbol": rate_limit_symbol,
     }
 
 
@@ -670,6 +692,7 @@ def fetch_company_facts(
     cik_limit: int,
     request_delay: float,
     selected_tags: tuple[str, ...],
+    stale_days: int,
 ) -> dict[str, Any]:
     target = []
     missing_cik = []
@@ -679,8 +702,49 @@ def fetch_company_facts(
             missing_cik.append(row["symbol"])
             continue
         target.append((row["symbol"], cik_value))
+
+    def parse_utc_ts(value: str | None) -> dt.datetime | None:
+        if not value:
+            return None
+        raw = value.strip()
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        try:
+            return dt.datetime.fromisoformat(raw)
+        except ValueError:
+            return None
+
+    meta_rows = conn.execute("SELECT cik, fetched_at FROM company_facts_meta").fetchall()
+    fetched_map: dict[str, str] = {}
+    for meta in meta_rows:
+        cik_key = normalize_cik(meta["cik"]) or ""
+        if not cik_key:
+            continue
+        fetched_map[cik_key] = meta["fetched_at"] or ""
+
+    now_dt = dt.datetime.now(dt.timezone.utc)
+    missing_in_db: list[tuple[str, str]] = []
+    stale_in_db: list[tuple[str, str, str]] = []
+    fresh_in_db: list[tuple[str, str, str]] = []
+
+    for symbol, cik_value in target:
+        cik_norm = normalize_cik(cik_value) or ""
+        fetched_at = fetched_map.get(cik_norm)
+        if not fetched_at:
+            missing_in_db.append((symbol, cik_value))
+            continue
+        fetched_dt = parse_utc_ts(fetched_at)
+        if stale_days > 0 and fetched_dt and (now_dt - fetched_dt) > dt.timedelta(days=stale_days):
+            stale_in_db.append((symbol, cik_value, fetched_at))
+        else:
+            fresh_in_db.append((symbol, cik_value, fetched_at))
+
+    stale_in_db.sort(key=lambda item: item[2])
+    fresh_in_db.sort(key=lambda item: item[2])
+    prioritized = missing_in_db + [(s, c) for (s, c, _) in stale_in_db] + [(s, c) for (s, c, _) in fresh_in_db]
+
     if cik_limit > 0:
-        target = target[:cik_limit]
+        prioritized = prioritized[:cik_limit]
 
     tag_set = set(selected_tags)
     ts = now_utc()
@@ -688,7 +752,7 @@ def fetch_company_facts(
     failed = []
     observations_written = 0
 
-    for idx, (symbol, cik_value) in enumerate(target, start=1):
+    for idx, (symbol, cik_value) in enumerate(prioritized, start=1):
         url = SEC_COMPANY_FACTS_URL_TMPL.format(cik=cik10(cik_value))
         response = session.get(url, timeout=45)
         if response.status_code != 200:
@@ -764,11 +828,17 @@ def fetch_company_facts(
         "cik_resolved": len(target),
         "missing_cik": len(missing_cik),
         "missing_cik_symbols": missing_cik[:25],
+        "facts_candidates": len(target),
+        "facts_selected": len(prioritized),
+        "facts_missing_in_db": len(missing_in_db),
+        "facts_stale_in_db": len(stale_in_db),
+        "facts_fresh_in_db": len(fresh_in_db),
         "facts_fetched": fetched,
         "facts_failed": len(failed),
         "failed_examples": failed[:10],
         "observations_written": observations_written,
         "selected_tags": list(selected_tags),
+        "stale_days": stale_days,
     }
 
 
@@ -1001,6 +1071,7 @@ def run_pipeline(args: argparse.Namespace) -> int:
                 cik_limit=args.facts_limit,
                 request_delay=args.request_delay,
                 selected_tags=tuple(args.sec_tags),
+                stale_days=args.facts_stale_days,
             ),
         )
         run_step(
@@ -1019,7 +1090,7 @@ def run_pipeline(args: argparse.Namespace) -> int:
         summary["completed_at"] = now_utc()
         overall_status = "success"
         for step in summary["steps"].values():
-            if step.get("status") == "error":
+            if step.get("status") in {"error", "rate_limited", "partial_failure"}:
                 overall_status = "partial_failure"
                 break
 
@@ -1056,6 +1127,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="User-Agent header for SEC requests.",
     )
     parser.add_argument("--facts-limit", type=int, default=25, help="Max number of CIKs to fetch per run.")
+    parser.add_argument(
+        "--facts-stale-days",
+        type=int,
+        default=30,
+        help="Refetch company facts if last fetched more than N days ago (0 disables staleness refresh).",
+    )
     parser.add_argument("--prices-symbol-limit", type=int, default=100, help="Max number of symbols for price fetch.")
     parser.add_argument(
         "--prices-rows-per-symbol",

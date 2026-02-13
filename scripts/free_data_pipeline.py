@@ -1056,9 +1056,18 @@ def update_tracker_with_summary(
             f"priced symbols {summary['steps']['quality_checks'].get('priced_symbol_count', 0)}, "
             f"facts CIKs {summary['steps']['quality_checks'].get('facts_cik_count', 0)}"
         )
-        warnings = summary.get("steps", {}).get("quality_checks", {}).get("warnings") or []
-        if warnings:
-            body += "\n\nWarnings:\n- " + "\n- ".join(str(item) for item in warnings[:10])
+        warnings = []
+        warnings.extend(summary.get("warnings") or [])
+        warnings.extend(summary.get("steps", {}).get("quality_checks", {}).get("warnings") or [])
+        deduped = []
+        seen = set()
+        for item in warnings:
+            text = str(item)
+            if text and text not in seen:
+                seen.add(text)
+                deduped.append(text)
+        if deduped:
+            body += "\n\nWarnings:\n- " + "\n- ".join(deduped[:10])
 
         for issue_key in [free_data_issue_key, "CAPE-4", "CAPE-5", "CAPE-6"]:
             if not issue_key:
@@ -1094,14 +1103,35 @@ def build_session(user_agent: str) -> requests.Session:
     return session
 
 
+def looks_like_placeholder_user_agent(user_agent: str) -> bool:
+    ua = (user_agent or "").strip().lower()
+    if not ua:
+        return True
+    placeholders = (
+        "replace-with-your-email",
+        "research@localhost",
+        "localhost",
+        "@example.com",
+    )
+    return any(token in ua for token in placeholders)
+
+
 def run_pipeline(args: argparse.Namespace) -> int:
     run_started_at = now_utc()
-    session = build_session(args.sec_user_agent)
     summary: dict[str, Any] = {
         "started_at": run_started_at,
         "completed_at": None,
         "steps": {},
+        "warnings": [],
     }
+
+    if looks_like_placeholder_user_agent(args.sec_user_agent) and not args.allow_placeholder_user_agent:
+        summary["warnings"].append(
+            "SEC_USER_AGENT looks like a placeholder. Set a real contact User-Agent for SEC fair-access compliance "
+            "(e.g. \"ccCAPE/0.1 (your-name your-email@company.com)\")."
+        )
+
+    session = build_session(args.sec_user_agent)
 
     with connect_data_db(args.data_db) as conn:
         init_data_db(conn)
@@ -1162,12 +1192,28 @@ def run_pipeline(args: argparse.Namespace) -> int:
         )
         run_step("quality_checks", lambda: run_quality_checks(conn))
 
+        # Merge pipeline-level warnings into quality checks so the UI can surface them.
+        qc_step = summary.get("steps", {}).get("quality_checks")
+        if isinstance(qc_step, dict) and summary.get("warnings"):
+            qc_warnings = list(qc_step.get("warnings") or [])
+            for warning in summary.get("warnings") or []:
+                if warning not in qc_warnings:
+                    qc_warnings.insert(0, warning)
+            qc_step["warnings"] = qc_warnings
+            if qc_warnings and qc_step.get("status") == "success":
+                qc_step["status"] = "warning"
+
         summary["completed_at"] = now_utc()
         overall_status = "success"
-        for step in summary["steps"].values():
-            if step.get("status") in {"error", "rate_limited", "warning", "partial_failure"}:
-                overall_status = "partial_failure"
-                break
+        statuses = [step.get("status", "success") for step in summary.get("steps", {}).values() if isinstance(step, dict)]
+        if any(status == "error" for status in statuses):
+            overall_status = "error"
+        elif any(status == "rate_limited" for status in statuses):
+            overall_status = "rate_limited"
+        elif any(status == "warning" for status in statuses):
+            overall_status = "warning"
+        elif any(status == "partial_failure" for status in statuses):
+            overall_status = "partial_failure"
 
         record_step_run(
             conn,
@@ -1200,6 +1246,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--sec-user-agent",
         default=os.getenv("SEC_USER_AGENT", "ccCAPE/0.1 (research@localhost)"),
         help="User-Agent header for SEC requests.",
+    )
+    parser.add_argument(
+        "--allow-placeholder-user-agent",
+        action="store_true",
+        default=False,
+        help="Bypass User-Agent validation (not recommended).",
     )
     parser.add_argument("--facts-limit", type=int, default=25, help="Max number of CIKs to fetch per run.")
     parser.add_argument(

@@ -50,7 +50,12 @@ CREATE TABLE IF NOT EXISTS cc_cape_runs (
     cc_cape REAL NOT NULL,
     avg_company_cape REAL NOT NULL,
     shiller_cape REAL,
+    shiller_cape_date TEXT,
     cape_spread REAL,
+    cc_cape_percentile REAL,
+    cc_cape_zscore REAL,
+    cape_spread_percentile REAL,
+    cape_spread_zscore REAL,
     notes_json TEXT
 );
 
@@ -98,7 +103,30 @@ def connect_data_db(path: str) -> sqlite3.Connection:
 
 def init_calc_db(conn: sqlite3.Connection) -> None:
     conn.executescript(CALC_SCHEMA)
+    migrate_calc_schema(conn)
     conn.commit()
+
+
+def migrate_calc_schema(conn: sqlite3.Connection) -> None:
+    """Best-effort schema migration for existing SQLite databases."""
+
+    existing_cols = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(cc_cape_runs)").fetchall()
+        if row and row["name"]
+    }
+
+    def add_col(name: str, col_type: str) -> None:
+        if name in existing_cols:
+            return
+        conn.execute(f"ALTER TABLE cc_cape_runs ADD COLUMN {name} {col_type}")
+        existing_cols.add(name)
+
+    add_col("shiller_cape_date", "TEXT")
+    add_col("cc_cape_percentile", "REAL")
+    add_col("cc_cape_zscore", "REAL")
+    add_col("cape_spread_percentile", "REAL")
+    add_col("cape_spread_zscore", "REAL")
 
 
 def normalize_symbol(symbol: str) -> str:
@@ -181,6 +209,44 @@ def cpi_for_date(target_date: dt.date, cpi_dates: list[dt.date], cpi_values: lis
     if idx < 0:
         return None
     return cpi_values[idx]
+
+
+def shiller_cape_asof(conn: sqlite3.Connection, target_date: dt.date) -> tuple[float, str] | None:
+    """Return (shiller_cape, observation_date) for the latest observation on/before target_date."""
+    try:
+        row = conn.execute(
+            """
+            SELECT observation_date, shiller_cape
+            FROM shiller_cape_observations
+            WHERE observation_date <= ?
+            ORDER BY observation_date DESC
+            LIMIT 1
+            """,
+            (target_date.isoformat(),),
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    if not row:
+        return None
+    obs_date = row["observation_date"]
+    return float(row["shiller_cape"]), obs_date
+
+
+def empirical_percentile(values: list[float], x: float) -> float | None:
+    if not values:
+        return None
+    count_le = sum(1 for v in values if v <= x)
+    return 100.0 * (count_le / len(values))
+
+
+def zscore(values: list[float], x: float) -> float | None:
+    if len(values) < 2:
+        return None
+    stdev = statistics.stdev(values)
+    if stdev <= 0:
+        return None
+    mean = statistics.mean(values)
+    return (x - mean) / stdev
 
 
 def latest_price(conn: sqlite3.Connection, symbol: str) -> sqlite3.Row | None:
@@ -403,7 +469,12 @@ def persist_run(
     cc_cape: float,
     avg_company_cape: float,
     shiller_cape: float | None,
+    shiller_cape_date: str | None,
     cape_spread: float | None,
+    cc_cape_percentile: float | None,
+    cc_cape_zscore: float | None,
+    cape_spread_percentile: float | None,
+    cape_spread_zscore: float | None,
     notes: dict[str, Any],
 ) -> int:
     cursor = conn.execute(
@@ -411,8 +482,10 @@ def persist_run(
         INSERT INTO cc_cape_runs
         (run_at, as_of_constituents_date, latest_price_date, symbols_total, symbols_with_price,
          symbols_with_valid_cape, min_eps_points, lookback_years, weighting_method, market_cap_coverage,
-         cc_cape, avg_company_cape, shiller_cape, cape_spread, notes_json)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         cc_cape, avg_company_cape, shiller_cape, shiller_cape_date, cape_spread,
+         cc_cape_percentile, cc_cape_zscore, cape_spread_percentile, cape_spread_zscore,
+         notes_json)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             now_utc(),
@@ -428,7 +501,12 @@ def persist_run(
             cc_cape,
             avg_company_cape,
             shiller_cape,
+            shiller_cape_date,
             cape_spread,
+            cc_cape_percentile,
+            cc_cape_zscore,
+            cape_spread_percentile,
+            cape_spread_zscore,
             json.dumps(notes, sort_keys=True),
         ),
     )
@@ -463,6 +541,51 @@ def persist_run(
     return run_id
 
 
+def update_run_history_stats(
+    conn: sqlite3.Connection,
+    *,
+    run_id: int,
+    cc_cape: float,
+    cape_spread: float | None,
+) -> dict[str, Any]:
+    cc_values = [float(row["cc_cape"]) for row in conn.execute("SELECT cc_cape FROM cc_cape_runs").fetchall()]
+    cc_pct = empirical_percentile(cc_values, cc_cape)
+    cc_z = zscore(cc_values, cc_cape)
+
+    spread_pct: float | None = None
+    spread_z: float | None = None
+    spread_values: list[float] = []
+    if cape_spread is not None:
+        spread_values = [
+            float(row["cape_spread"])
+            for row in conn.execute("SELECT cape_spread FROM cc_cape_runs WHERE cape_spread IS NOT NULL").fetchall()
+        ]
+        spread_pct = empirical_percentile(spread_values, cape_spread)
+        spread_z = zscore(spread_values, cape_spread)
+
+    conn.execute(
+        """
+        UPDATE cc_cape_runs
+        SET cc_cape_percentile = ?,
+            cc_cape_zscore = ?,
+            cape_spread_percentile = ?,
+            cape_spread_zscore = ?
+        WHERE run_id = ?
+        """,
+        (cc_pct, cc_z, spread_pct, spread_z, run_id),
+    )
+    conn.commit()
+
+    return {
+        "cc_cape_percentile": cc_pct,
+        "cc_cape_zscore": cc_z,
+        "cape_spread_percentile": spread_pct,
+        "cape_spread_zscore": spread_z,
+        "history_cc_cape_count": len(cc_values),
+        "history_spread_count": len(spread_values),
+    }
+
+
 def write_markdown_summary(path: str, summary: dict[str, Any], metrics: list[dict[str, Any]], top_n: int) -> None:
     output = Path(path).expanduser()
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -478,8 +601,21 @@ def write_markdown_summary(path: str, summary: dict[str, Any], metrics: list[dic
     lines.append("## Headline")
     lines.append("")
     lines.append(f"- CC CAPE: **{summary['cc_cape']:.3f}**")
-    if summary["cape_spread"] is not None:
-        lines.append(f"- CAPE Spread (vs supplied Shiller CAPE): **{summary['cape_spread']:.3f}**")
+    if summary.get("cc_cape_percentile") is not None:
+        lines.append(f"- CC CAPE percentile (run history): **{summary['cc_cape_percentile']:.1f}%**")
+    if summary.get("cc_cape_zscore") is not None:
+        lines.append(f"- CC CAPE z-score (run history): **{summary['cc_cape_zscore']:.2f}**")
+    if summary.get("shiller_cape") is not None:
+        shiller_line = f"- Shiller CAPE: **{summary['shiller_cape']:.3f}**"
+        if summary.get("shiller_cape_date"):
+            shiller_line += f" (as of {summary['shiller_cape_date']})"
+        lines.append(shiller_line)
+    if summary.get("cape_spread") is not None:
+        lines.append(f"- CAPE Spread (CC CAPE - Shiller): **{summary['cape_spread']:.3f}**")
+        if summary.get("cape_spread_percentile") is not None:
+            lines.append(f"- Spread percentile (run history): **{summary['cape_spread_percentile']:.1f}%**")
+        if summary.get("cape_spread_zscore") is not None:
+            lines.append(f"- Spread z-score (run history): **{summary['cape_spread_zscore']:.2f}**")
     lines.append(f"- Weighting: `{summary['weighting_method']}`")
     lines.append(f"- Symbols total: {summary['symbols_total']}")
     lines.append(f"- Symbols with latest price: {summary['symbols_with_price']}")
@@ -605,8 +741,21 @@ def update_tracker(
             f"Min EPS points: {summary['min_eps_points']}\n"
             f"Market-cap coverage: {summary['market_cap_coverage']:.3f}"
         )
+        if summary.get("cc_cape_percentile") is not None:
+            body += f"\nCC CAPE percentile: {summary['cc_cape_percentile']:.1f}%"
+        if summary.get("cc_cape_zscore") is not None:
+            body += f"\nCC CAPE z-score: {summary['cc_cape_zscore']:.2f}"
+        if summary.get("shiller_cape") is not None:
+            shiller = f"{summary['shiller_cape']:.4f}"
+            if summary.get("shiller_cape_date"):
+                shiller += f" (as of {summary['shiller_cape_date']})"
+            body += f"\nShiller CAPE: {shiller}"
         if summary["cape_spread"] is not None:
             body += f"\nCAPE spread: {summary['cape_spread']:.4f}"
+            if summary.get("cape_spread_percentile") is not None:
+                body += f"\nSpread percentile: {summary['cape_spread_percentile']:.1f}%"
+            if summary.get("cape_spread_zscore") is not None:
+                body += f"\nSpread z-score: {summary['cape_spread_zscore']:.2f}"
 
         for issue_key in [calc_issue_key, "CAPE-8", "CAPE-9"]:
             if not issue_key:
@@ -681,8 +830,6 @@ def run_calculation(args: argparse.Namespace) -> dict[str, Any]:
         cc_cape = sum(metric["weight"] * metric["company_cape"] for metric in metrics)
         avg_company_cape = statistics.mean(metric["company_cape"] for metric in metrics)
 
-        shiller_cape = args.shiller_cape
-        cape_spread = (cc_cape - shiller_cape) if shiller_cape is not None else None
         latest_price_date = max(metric["price_date"] for metric in metrics)
 
         notes = {
@@ -692,6 +839,22 @@ def run_calculation(args: argparse.Namespace) -> dict[str, Any]:
             "skipped_invalid_metrics": skipped_invalid,
             "symbols_requested": len(constituents),
         }
+
+        shiller_cape = args.shiller_cape
+        shiller_cape_date: str | None = None
+        if shiller_cape is not None:
+            notes["shiller_cape_source"] = "cli"
+        else:
+            target_date = parse_date(latest_price_date)
+            if target_date is not None:
+                lookup = shiller_cape_asof(conn, target_date)
+                if lookup is not None:
+                    shiller_cape, shiller_cape_date = lookup
+                    notes["shiller_cape_source"] = "multpl"
+                    notes["shiller_cape_observation_date"] = shiller_cape_date
+                    notes["shiller_cape_target_date"] = target_date.isoformat()
+
+        cape_spread = (cc_cape - shiller_cape) if shiller_cape is not None else None
 
         run_id = persist_run(
             conn,
@@ -707,9 +870,16 @@ def run_calculation(args: argparse.Namespace) -> dict[str, Any]:
             cc_cape=cc_cape,
             avg_company_cape=avg_company_cape,
             shiller_cape=shiller_cape,
+            shiller_cape_date=shiller_cape_date,
             cape_spread=cape_spread,
+            cc_cape_percentile=None,
+            cc_cape_zscore=None,
+            cape_spread_percentile=None,
+            cape_spread_zscore=None,
             notes=notes,
         )
+
+        history_stats = update_run_history_stats(conn, run_id=run_id, cc_cape=cc_cape, cape_spread=cape_spread)
 
     summary = {
         "run_id": run_id,
@@ -726,7 +896,12 @@ def run_calculation(args: argparse.Namespace) -> dict[str, Any]:
         "cc_cape": cc_cape,
         "avg_company_cape": avg_company_cape,
         "shiller_cape": shiller_cape,
+        "shiller_cape_date": shiller_cape_date,
         "cape_spread": cape_spread,
+        "cc_cape_percentile": history_stats["cc_cape_percentile"],
+        "cc_cape_zscore": history_stats["cc_cape_zscore"],
+        "cape_spread_percentile": history_stats["cape_spread_percentile"],
+        "cape_spread_zscore": history_stats["cape_spread_zscore"],
         "notes": notes,
     }
 
@@ -755,7 +930,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=0.8,
         help="Minimum market-cap coverage to use market-cap weighting; otherwise equal-weight fallback.",
     )
-    parser.add_argument("--shiller-cape", type=float, default=None, help="Optional benchmark Shiller CAPE.")
+    parser.add_argument(
+        "--shiller-cape",
+        type=float,
+        default=None,
+        help="Optional benchmark Shiller CAPE. If omitted, uses latest ingested Shiller CAPE on/before latest price date.",
+    )
     parser.add_argument(
         "--update-tracker",
         action=argparse.BooleanOptionalAction,

@@ -47,6 +47,7 @@ SEC_TICKER_MAP_URL = "https://www.sec.gov/files/company_tickers_exchange.json"
 SEC_COMPANY_FACTS_URL_TMPL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
 FRED_CPI_CSV_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=CPIAUCSL"
 STOOQ_DAILY_URL_TMPL = "https://stooq.com/q/d/l/?s={symbol}.us&i=d"
+MULTPL_SHILLER_PE_URL = "https://www.multpl.com/shiller-pe/table/by-month"
 
 DEFAULT_TAGS = (
     "NetIncomeLoss",
@@ -85,6 +86,13 @@ CREATE TABLE IF NOT EXISTS sec_ticker_map (
 CREATE TABLE IF NOT EXISTS cpi_observations (
     observation_date TEXT PRIMARY KEY,
     cpi_value REAL NOT NULL,
+    source_url TEXT NOT NULL,
+    ingested_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS shiller_cape_observations (
+    observation_date TEXT PRIMARY KEY,
+    shiller_cape REAL NOT NULL,
     source_url TEXT NOT NULL,
     ingested_at TEXT NOT NULL
 );
@@ -433,6 +441,72 @@ def fetch_fred_cpi_csv(session: requests.Session, conn: sqlite3.Connection) -> d
     }
 
 
+def parse_multpl_shiller_pe_table(html: str) -> list[tuple[str, float]]:
+    soup = BeautifulSoup(html, "html.parser")
+    table = soup.find("table")
+    if table is None:
+        raise PipelineError("Could not find Shiller PE table on Multpl page.")
+
+    observations: list[tuple[str, float]] = []
+    for tr in table.find_all("tr"):
+        cols = [cell.get_text(" ", strip=True) for cell in tr.find_all(["th", "td"])]
+        if len(cols) != 2:
+            continue
+        if cols[0].lower() == "date":
+            continue
+
+        date_raw, value_raw = cols
+        date_raw = date_raw.strip()
+        value_raw = value_raw.strip().replace(",", "")
+        if not date_raw or not value_raw:
+            continue
+        try:
+            parsed_date = dt.datetime.strptime(date_raw, "%b %d, %Y").date()
+        except ValueError:
+            continue
+        try:
+            value = float(value_raw)
+        except ValueError:
+            continue
+        observations.append((parsed_date.isoformat(), value))
+
+    if not observations:
+        raise PipelineError("No Shiller PE observations parsed from Multpl table.")
+    return observations
+
+
+def fetch_shiller_cape_multpl(session: requests.Session, conn: sqlite3.Connection) -> dict[str, Any]:
+    response = session.get(MULTPL_SHILLER_PE_URL, timeout=45)
+    response.raise_for_status()
+
+    observations = parse_multpl_shiller_pe_table(response.text)
+    ts = now_utc()
+    inserted = 0
+    for obs_date, value in observations:
+        conn.execute(
+            """
+            INSERT INTO shiller_cape_observations (observation_date, shiller_cape, source_url, ingested_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(observation_date)
+            DO UPDATE SET
+                shiller_cape = excluded.shiller_cape,
+                source_url = excluded.source_url,
+                ingested_at = excluded.ingested_at
+            """,
+            (obs_date, value, MULTPL_SHILLER_PE_URL, ts),
+        )
+        inserted += 1
+
+    conn.commit()
+    dates = [d for d, _ in observations]
+    return {
+        "status": "success",
+        "records": inserted,
+        "min_observation_date": min(dates),
+        "max_observation_date": max(dates),
+    }
+
+
 def stooq_symbol_variants(symbol: str) -> list[str]:
     base = symbol.lower()
     variants = [
@@ -715,12 +789,17 @@ def run_quality_checks(conn: sqlite3.Connection) -> dict[str, Any]:
         "SELECT COUNT(DISTINCT cik) AS count_cik FROM company_facts_meta"
     ).fetchone()["count_cik"]
 
+    shiller_latest = conn.execute(
+        "SELECT MAX(observation_date) AS observation_date FROM shiller_cape_observations"
+    ).fetchone()["observation_date"]
+
     return {
         "status": "success",
         "constituent_count": total_constituents,
         "missing_cik_count": missing_cik,
         "priced_symbol_count": int(latest_price_count or 0),
         "facts_cik_count": int(facts_cik_count or 0),
+        "shiller_latest_observation_date": shiller_latest,
     }
 
 
@@ -824,6 +903,8 @@ def update_tracker_with_summary(
             f"({summary['steps']['sec_ticker_map'].get('records', 0)} rows)\n"
             f"CPI: {summary['steps']['cpi'].get('status')} "
             f"({summary['steps']['cpi'].get('records', 0)} rows)\n"
+            f"Shiller CAPE: {summary['steps'].get('shiller_cape', {}).get('status')} "
+            f"(through {summary['steps'].get('shiller_cape', {}).get('max_observation_date', '-')})\n"
             f"Company facts: {summary['steps']['company_facts'].get('facts_fetched', 0)} fetched, "
             f"{summary['steps']['company_facts'].get('facts_failed', 0)} failed, "
             f"{summary['steps']['company_facts'].get('missing_cik', 0)} missing CIK\n"
@@ -908,6 +989,7 @@ def run_pipeline(args: argparse.Namespace) -> int:
         run_step("constituents", lambda: fetch_sp500_constituents(session, conn))
         run_step("sec_ticker_map", lambda: fetch_sec_ticker_map(session, conn))
         run_step("cpi", lambda: fetch_fred_cpi_csv(session, conn))
+        run_step("shiller_cape", lambda: fetch_shiller_cape_multpl(session, conn))
 
         constituents = load_latest_constituents(conn)
         run_step(

@@ -44,6 +44,32 @@ app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="stat
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
 
 
+def _serialize_cc_cape_run(row: sqlite3.Row) -> dict:
+    data = dict(row)
+    return {
+        "run_id": data.get("run_id"),
+        "run_at": data.get("run_at"),
+        "as_of_constituents_date": data.get("as_of_constituents_date"),
+        "latest_price_date": data.get("latest_price_date"),
+        "cc_cape": data.get("cc_cape"),
+        "avg_company_cape": data.get("avg_company_cape"),
+        "cc_cape_percentile": data.get("cc_cape_percentile"),
+        "cc_cape_zscore": data.get("cc_cape_zscore"),
+        "symbols_total": data.get("symbols_total"),
+        "symbols_with_price": data.get("symbols_with_price"),
+        "symbols_with_valid_cape": data.get("symbols_with_valid_cape"),
+        "weighting_method": data.get("weighting_method"),
+        "market_cap_coverage": data.get("market_cap_coverage"),
+        "lookback_years": data.get("lookback_years"),
+        "min_eps_points": data.get("min_eps_points"),
+        "shiller_cape": data.get("shiller_cape"),
+        "shiller_cape_date": data.get("shiller_cape_date"),
+        "cape_spread": data.get("cape_spread"),
+        "cape_spread_percentile": data.get("cape_spread_percentile"),
+        "cape_spread_zscore": data.get("cape_spread_zscore"),
+    }
+
+
 def _open_conn():
     conn = connect(DB_PATH)
     init_db(conn)
@@ -134,7 +160,7 @@ def metrics_cc_cape(request: Request):
         )
 
     with free_conn:
-        latest_run = free_conn.execute(
+        latest_run_row = free_conn.execute(
             """
             SELECT *
             FROM cc_cape_runs
@@ -142,10 +168,9 @@ def metrics_cc_cape(request: Request):
             LIMIT 1
             """
         ).fetchone()
-        runs = free_conn.execute(
+        runs_rows = free_conn.execute(
             """
-            SELECT run_id, run_at, cc_cape, symbols_total, symbols_with_price, symbols_with_valid_cape,
-                   weighting_method, market_cap_coverage, lookback_years, min_eps_points
+            SELECT *
             FROM cc_cape_runs
             ORDER BY run_id DESC
             LIMIT 30
@@ -160,6 +185,9 @@ def metrics_cc_cape(request: Request):
             LIMIT 1
             """
         ).fetchone()
+
+    latest_run = dict(latest_run_row) if latest_run_row else None
+    runs = [dict(row) for row in runs_rows]
 
     latest_ingestion = None
     if ingestion:
@@ -535,23 +563,10 @@ def api_cc_cape_latest(request: Request):
     if not row:
         raise HTTPException(status_code=404, detail="No CC CAPE runs found.")
 
-    return {
-        "run_id": row["run_id"],
-        "run_at": row["run_at"],
-        "cc_cape": row["cc_cape"],
-        "avg_company_cape": row["avg_company_cape"],
-        "symbols_total": row["symbols_total"],
-        "symbols_with_price": row["symbols_with_price"],
-        "symbols_with_valid_cape": row["symbols_with_valid_cape"],
-        "lookback_years": row["lookback_years"],
-        "min_eps_points": row["min_eps_points"],
-        "weighting_method": row["weighting_method"],
-        "market_cap_coverage": row["market_cap_coverage"],
-        "shiller_cape": row["shiller_cape"],
-        "cape_spread": row["cape_spread"],
-        "viewer_role": user["role"],
-        "generated_at": now_utc(),
-    }
+    payload = _serialize_cc_cape_run(row)
+    payload["viewer_role"] = user["role"]
+    payload["generated_at"] = now_utc()
+    return payload
 
 
 @app.get("/api/metrics/cc-cape/runs")
@@ -569,9 +584,7 @@ def api_cc_cape_runs(request: Request, limit: int = 50):
     with free_conn:
         rows = free_conn.execute(
             """
-            SELECT run_id, run_at, cc_cape, avg_company_cape, symbols_total, symbols_with_price,
-                   symbols_with_valid_cape, weighting_method, market_cap_coverage,
-                   lookback_years, min_eps_points, shiller_cape, cape_spread
+            SELECT *
             FROM cc_cape_runs
             ORDER BY run_id DESC
             LIMIT ?
@@ -581,24 +594,7 @@ def api_cc_cape_runs(request: Request, limit: int = 50):
 
     return {
         "count": len(rows),
-        "runs": [
-            {
-                "run_id": r["run_id"],
-                "run_at": r["run_at"],
-                "cc_cape": r["cc_cape"],
-                "avg_company_cape": r["avg_company_cape"],
-                "symbols_total": r["symbols_total"],
-                "symbols_with_price": r["symbols_with_price"],
-                "symbols_with_valid_cape": r["symbols_with_valid_cape"],
-                "weighting_method": r["weighting_method"],
-                "market_cap_coverage": r["market_cap_coverage"],
-                "lookback_years": r["lookback_years"],
-                "min_eps_points": r["min_eps_points"],
-                "shiller_cape": r["shiller_cape"],
-                "cape_spread": r["cape_spread"],
-            }
-            for r in rows
-        ],
+        "runs": [_serialize_cc_cape_run(r) for r in rows],
         "viewer_role": user["role"],
         "generated_at": now_utc(),
     }

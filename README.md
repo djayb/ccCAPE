@@ -152,6 +152,7 @@ What it ingests:
 - Wikipedia S&P 500 constituents (including CIKs)
 - SEC company facts by CIK
 - FRED CPI CSV (`CPIAUCSL`)
+- Shiller CAPE history (Multpl Shiller PE table)
 - Stooq daily price history
 
 Outputs:
@@ -191,6 +192,9 @@ Outputs:
   - `CAPE-8`, `CAPE-9`, and a dedicated free-calc issue under Phase 2.
 
 Optional benchmark spread:
+
+By default, the calculator uses the latest ingested Shiller CAPE on/before the latest price date.
+You can override with an explicit value:
 
 ```bash
 python3 scripts/calc_cc_cape_free.py --shiller-cape 31.5

@@ -9,8 +9,11 @@ This repository includes:
 - Runbook: `docs/RUNBOOK.md`
 - Architecture: `docs/ARCHITECTURE.md`
 - Data model: `docs/DATA_MODEL.md`
+- Methodology: `docs/METHODOLOGY.md`
+- Data sources: `docs/DATA_SOURCES.md`
 - Onboarding: `docs/ONBOARDING.md`
 - Release checklist: `docs/RELEASE_CHECKLIST.md`
+- Pilot plan: `docs/PILOT_PLAN.md`
 - Internal Jira-like tracker CLI: `internal_jira.py`
 - Internal web tracker UI with auth/roles: `web_app.py`
 

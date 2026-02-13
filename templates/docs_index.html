@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="toolbar">
+  <div>
+    <h1 style="margin: 0">Docs</h1>
+    <div class="muted">Browse markdown files from <code>docs/</code>.</div>
+  </div>
+</div>
+
+<div class="panel">
+  {% if docs %}
+  <table class="table">
+    <thead>
+      <tr>
+        <th>Document</th>
+        <th class="muted">Size (KB)</th>
+        <th class="muted">Modified</th>
+        <th></th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for doc in docs %}
+      <tr>
+        <td><a href="/docs/view/{{ doc.relpath }}">{{ doc.name }}</a></td>
+        <td class="muted">{{ doc.size_kb }}</td>
+        <td class="muted">{{ doc.mtime }}</td>
+        <td><a href="/docs/raw/{{ doc.relpath }}">raw</a></td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <div class="empty">No <code>.md</code> files found in <code>docs/</code>.</div>
+  {% endif %}
+</div>
+{% endblock %}
+

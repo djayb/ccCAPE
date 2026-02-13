@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import csv
+import datetime as dt
 import io
 import json
 import os
@@ -40,8 +41,14 @@ DB_PATH = os.environ.get("TRACKER_DB", "data/internal_jira.db")
 FREE_DATA_DB_PATH = os.environ.get("FREE_DATA_DB", "data/free_data.db")
 SESSION_SECRET = os.environ.get("TRACKER_SESSION_SECRET", "replace-this-secret")
 BASE_DIR = Path(__file__).resolve().parent
+DOCS_DIR = BASE_DIR / "docs"
 
-app = FastAPI(title="CC CAPE Internal Tracker")
+app = FastAPI(
+    title="CC CAPE Internal Tracker",
+    docs_url="/api/docs",
+    redoc_url="/api/redoc",
+    openapi_url="/api/openapi.json",
+)
 app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET, same_site="lax")
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
@@ -182,6 +189,103 @@ def root() -> RedirectResponse:
 @app.get("/metrics", response_class=HTMLResponse)
 def metrics_redirect() -> RedirectResponse:
     return RedirectResponse("/metrics/cc-cape", status_code=303)
+
+
+def _resolve_docs_path(relpath: str) -> Path:
+    """Resolve a user-provided docs path safely inside DOCS_DIR."""
+    if not relpath:
+        raise HTTPException(status_code=400, detail="Missing doc path.")
+    if relpath.startswith(("/", "\\")):
+        raise HTTPException(status_code=400, detail="Invalid doc path.")
+    if ".." in relpath.replace("\\", "/").split("/"):
+        raise HTTPException(status_code=400, detail="Invalid doc path.")
+
+    root = DOCS_DIR.resolve()
+    candidate = (DOCS_DIR / relpath).resolve()
+    if candidate == root or root not in candidate.parents:
+        raise HTTPException(status_code=400, detail="Invalid doc path.")
+    if candidate.suffix.lower() not in {".md", ".txt"}:
+        raise HTTPException(status_code=400, detail="Unsupported doc type.")
+    if not candidate.exists() or not candidate.is_file():
+        raise HTTPException(status_code=404, detail="Doc not found.")
+    return candidate
+
+
+@app.get("/docs", response_class=HTMLResponse)
+def docs_index(request: Request):
+    with _open_conn() as tracker_conn:
+        user, redirect = _require_login(request, tracker_conn)
+        if redirect:
+            return redirect
+
+    docs: list[dict[str, str]] = []
+    if DOCS_DIR.exists():
+        for path in sorted(DOCS_DIR.glob("*.md")):
+            try:
+                stat = path.stat()
+                mtime = dt.datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M")
+                docs.append(
+                    {
+                        "name": path.name,
+                        "relpath": path.name,
+                        "size_kb": f"{int(stat.st_size / 1024)}",
+                        "mtime": mtime,
+                    }
+                )
+            except OSError:
+                continue
+
+    return templates.TemplateResponse(
+        "docs_index.html",
+        {
+            "request": request,
+            "user": user,
+            "docs": docs,
+            "message": request.query_params.get("msg", ""),
+            "error": request.query_params.get("err", ""),
+        },
+    )
+
+
+@app.get("/docs/view/{doc_path:path}", response_class=HTMLResponse)
+def docs_view(request: Request, doc_path: str):
+    with _open_conn() as tracker_conn:
+        user, redirect = _require_login(request, tracker_conn)
+        if redirect:
+            return redirect
+
+    path = _resolve_docs_path(doc_path)
+    try:
+        content = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        raise HTTPException(status_code=500, detail="Failed to read doc.")
+
+    return templates.TemplateResponse(
+        "docs_view.html",
+        {
+            "request": request,
+            "user": user,
+            "doc_name": path.name,
+            "relpath": doc_path,
+            "content": content,
+        },
+    )
+
+
+@app.get("/docs/raw/{doc_path:path}")
+def docs_raw(request: Request, doc_path: str):
+    with _open_conn() as tracker_conn:
+        user, redirect = _require_login(request, tracker_conn)
+        if redirect:
+            return redirect
+
+    path = _resolve_docs_path(doc_path)
+    try:
+        content = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        raise HTTPException(status_code=500, detail="Failed to read doc.")
+
+    return Response(content, media_type="text/plain; charset=utf-8")
 
 
 @app.get("/metrics/cc-cape", response_class=HTMLResponse)
@@ -360,6 +464,19 @@ def metrics_health(request: Request):
                     "latest_cc_cape": float(latest["cc_cape"]) if latest and latest["cc_cape"] is not None else None,
                 }
 
+    kpi_report = None
+    kpi_path = DOCS_DIR / "KPI_BASELINE.md"
+    if kpi_path.exists():
+        try:
+            stat = kpi_path.stat()
+            kpi_report = {
+                "relpath": kpi_path.name,
+                "size_kb": f"{int(stat.st_size / 1024)}",
+                "mtime": dt.datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M"),
+            }
+        except OSError:
+            kpi_report = None
+
     return templates.TemplateResponse(
         "metrics_health.html",
         {
@@ -368,6 +485,7 @@ def metrics_health(request: Request):
             "pipeline": pipeline_obj,
             "calc": calc_obj,
             "series": series_obj,
+            "kpi_report": kpi_report,
             "message": request.query_params.get("msg", ""),
             "error": request.query_params.get("error", ""),
         },

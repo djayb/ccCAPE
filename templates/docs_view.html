@@ -1,0 +1,18 @@
+{% extends "base.html" %}
+{% block content %}
+<div class="toolbar">
+  <div>
+    <h1 style="margin: 0">{{ doc_name }}</h1>
+    <div class="muted"><code>docs/{{ relpath }}</code></div>
+  </div>
+  <div class="inline-form">
+    <a class="btn btn-secondary" href="/docs">Back</a>
+    <a class="btn btn-secondary" href="/docs/raw/{{ relpath }}">Download raw</a>
+  </div>
+</div>
+
+<div class="panel">
+  <pre style="white-space: pre-wrap; margin: 0; font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", \"Courier New\", monospace;">{{ content }}</pre>
+</div>
+{% endblock %}
+

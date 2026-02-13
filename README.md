@@ -45,6 +45,8 @@ uvicorn web_app:app --reload --host 0.0.0.0 --port 8000
 Open:
 
 - [http://127.0.0.1:8000](http://127.0.0.1:8000)
+- [http://127.0.0.1:8000/metrics/cc-cape](http://127.0.0.1:8000/metrics/cc-cape)
+- [http://127.0.0.1:8000/metrics/cc-cape/contributors](http://127.0.0.1:8000/metrics/cc-cape/contributors)
 
 ## 4. Run With Docker
 
@@ -95,6 +97,10 @@ Available endpoints:
 - `GET /api/board?project=CAPE`
 - `GET /api/issues?project=CAPE&status=in_progress`
 - `GET /api/issues/{issue_key}`
+- `GET /api/metrics/cc-cape/latest`
+- `GET /api/metrics/cc-cape/runs?limit=N`
+- `GET /api/metrics/cc-cape/constituents?run_id=ID&limit=N&sort=weight|contribution|cape|symbol`
+- `GET /api/metrics/cc-cape/sectors?run_id=ID`
 
 ## 6. CLI Usage (Core)
 

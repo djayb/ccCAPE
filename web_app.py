@@ -3,13 +3,15 @@
 
 from __future__ import annotations
 
+import csv
+import io
+import json
 import os
 from pathlib import Path
 import sqlite3
-import json
 
 from fastapi import FastAPI, Request, Form, HTTPException
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
@@ -218,6 +220,250 @@ def metrics_cc_cape(request: Request):
             "error": request.query_params.get("error", ""),
         },
     )
+
+
+def _get_cc_cape_run(free_conn: sqlite3.Connection, run_id: int | None) -> sqlite3.Row | None:
+    if run_id is None:
+        return free_conn.execute(
+            """
+            SELECT *
+            FROM cc_cape_runs
+            ORDER BY run_id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    return free_conn.execute(
+        """
+        SELECT *
+        FROM cc_cape_runs
+        WHERE run_id = ?
+        """,
+        (run_id,),
+    ).fetchone()
+
+
+def _csv_response(filename: str, fieldnames: list[str], rows: list[dict]) -> Response:
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=fieldnames, extrasaction="ignore")
+    writer.writeheader()
+    for row in rows:
+        writer.writerow(row)
+    return Response(
+        content=buf.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.get("/metrics/cc-cape/contributors", response_class=HTMLResponse)
+def metrics_cc_cape_contributors(request: Request, run_id: int | None = None, top_n: int = 25):
+    if top_n < 5 or top_n > 200:
+        top_n = 25
+
+    with _open_conn() as tracker_conn:
+        user, redirect = _require_login(request, tracker_conn)
+        if redirect:
+            return redirect
+
+    free_conn = _open_free_data_conn()
+    if free_conn is None:
+        return templates.TemplateResponse(
+            "metrics_contributors.html",
+            {
+                "request": request,
+                "user": user,
+                "run": None,
+                "sectors": [],
+                "top_constituents": [],
+                "top_contributors": [],
+                "message": request.query_params.get("msg", ""),
+                "error": "Free-data DB not found. Run scripts/free_data_pipeline.py first.",
+            },
+        )
+
+    with free_conn:
+        run = _get_cc_cape_run(free_conn, run_id)
+        if not run:
+            return templates.TemplateResponse(
+                "metrics_contributors.html",
+                {
+                    "request": request,
+                    "user": user,
+                    "run": None,
+                    "sectors": [],
+                    "top_constituents": [],
+                    "top_contributors": [],
+                    "message": request.query_params.get("msg", ""),
+                    "error": request.query_params.get("error", "No matching CC CAPE run found."),
+                },
+            )
+
+        sectors = free_conn.execute(
+            """
+            SELECT COALESCE(gics_sector, '(Unknown)') AS sector,
+                   COUNT(*) AS constituents,
+                   SUM(weight) AS weight_sum,
+                   SUM(weight * company_cape) AS contribution,
+                   CASE WHEN SUM(weight) > 0 THEN SUM(weight * company_cape) / SUM(weight) END AS sector_cape
+            FROM cc_cape_constituent_metrics
+            WHERE run_id = ?
+            GROUP BY COALESCE(gics_sector, '(Unknown)')
+            ORDER BY contribution DESC
+            """,
+            (run["run_id"],),
+        ).fetchall()
+
+        top_constituents = free_conn.execute(
+            """
+            SELECT m.symbol,
+                   c.security,
+                   m.gics_sector,
+                   m.weight,
+                   m.company_cape,
+                   (m.weight * m.company_cape) AS contribution
+            FROM cc_cape_constituent_metrics m
+            JOIN cc_cape_runs r ON r.run_id = m.run_id
+            LEFT JOIN sp500_constituents c
+              ON c.symbol = m.symbol AND c.as_of_date = r.as_of_constituents_date
+            WHERE m.run_id = ?
+            ORDER BY m.weight DESC
+            LIMIT ?
+            """,
+            (run["run_id"], top_n),
+        ).fetchall()
+
+        top_contributors = free_conn.execute(
+            """
+            SELECT m.symbol,
+                   c.security,
+                   m.gics_sector,
+                   m.weight,
+                   m.company_cape,
+                   (m.weight * m.company_cape) AS contribution
+            FROM cc_cape_constituent_metrics m
+            JOIN cc_cape_runs r ON r.run_id = m.run_id
+            LEFT JOIN sp500_constituents c
+              ON c.symbol = m.symbol AND c.as_of_date = r.as_of_constituents_date
+            WHERE m.run_id = ?
+            ORDER BY (m.weight * m.company_cape) DESC
+            LIMIT ?
+            """,
+            (run["run_id"], top_n),
+        ).fetchall()
+
+    return templates.TemplateResponse(
+        "metrics_contributors.html",
+        {
+            "request": request,
+            "user": user,
+            "run": run,
+            "sectors": sectors,
+            "top_constituents": top_constituents,
+            "top_contributors": top_contributors,
+            "message": request.query_params.get("msg", ""),
+            "error": request.query_params.get("error", ""),
+        },
+    )
+
+
+@app.get("/metrics/cc-cape/export/constituents.csv")
+def export_cc_cape_constituents_csv(request: Request, run_id: int | None = None):
+    with _open_conn() as tracker_conn:
+        user, redirect = _require_login(request, tracker_conn)
+        if redirect:
+            return redirect
+
+    free_conn = _open_free_data_conn()
+    if free_conn is None:
+        raise HTTPException(status_code=404, detail="Free-data DB not found.")
+
+    with free_conn:
+        run = _get_cc_cape_run(free_conn, run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="No CC CAPE runs found.")
+
+        rows = free_conn.execute(
+            """
+            SELECT m.symbol,
+                   c.security,
+                   m.cik,
+                   m.gics_sector,
+                   m.price_date,
+                   m.close_price,
+                   m.shares_outstanding,
+                   m.market_cap,
+                   m.eps_tag,
+                   m.eps_points,
+                   m.avg_real_eps,
+                   m.company_cape,
+                   m.weight,
+                   (m.weight * m.company_cape) AS contribution
+            FROM cc_cape_constituent_metrics m
+            JOIN cc_cape_runs r ON r.run_id = m.run_id
+            LEFT JOIN sp500_constituents c
+              ON c.symbol = m.symbol AND c.as_of_date = r.as_of_constituents_date
+            WHERE m.run_id = ?
+            ORDER BY m.weight DESC, m.symbol
+            """,
+            (run["run_id"],),
+        ).fetchall()
+
+    data = [dict(row) for row in rows]
+    fieldnames = [
+        "symbol",
+        "security",
+        "cik",
+        "gics_sector",
+        "price_date",
+        "close_price",
+        "shares_outstanding",
+        "market_cap",
+        "eps_tag",
+        "eps_points",
+        "avg_real_eps",
+        "company_cape",
+        "weight",
+        "contribution",
+    ]
+    filename = f"cc_cape_constituents_run_{run['run_id']}.csv"
+    return _csv_response(filename, fieldnames, data)
+
+
+@app.get("/metrics/cc-cape/export/sectors.csv")
+def export_cc_cape_sectors_csv(request: Request, run_id: int | None = None):
+    with _open_conn() as tracker_conn:
+        user, redirect = _require_login(request, tracker_conn)
+        if redirect:
+            return redirect
+
+    free_conn = _open_free_data_conn()
+    if free_conn is None:
+        raise HTTPException(status_code=404, detail="Free-data DB not found.")
+
+    with free_conn:
+        run = _get_cc_cape_run(free_conn, run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="No CC CAPE runs found.")
+
+        rows = free_conn.execute(
+            """
+            SELECT COALESCE(gics_sector, '(Unknown)') AS sector,
+                   COUNT(*) AS constituents,
+                   SUM(weight) AS weight_sum,
+                   SUM(weight * company_cape) AS contribution,
+                   CASE WHEN SUM(weight) > 0 THEN SUM(weight * company_cape) / SUM(weight) END AS sector_cape
+            FROM cc_cape_constituent_metrics
+            WHERE run_id = ?
+            GROUP BY COALESCE(gics_sector, '(Unknown)')
+            ORDER BY contribution DESC
+            """,
+            (run["run_id"],),
+        ).fetchall()
+
+    data = [dict(row) for row in rows]
+    fieldnames = ["sector", "constituents", "weight_sum", "sector_cape", "contribution"]
+    filename = f"cc_cape_sectors_run_{run['run_id']}.csv"
+    return _csv_response(filename, fieldnames, data)
 
 
 @app.get("/login", response_class=HTMLResponse)
@@ -595,6 +841,115 @@ def api_cc_cape_runs(request: Request, limit: int = 50):
     return {
         "count": len(rows),
         "runs": [_serialize_cc_cape_run(r) for r in rows],
+        "viewer_role": user["role"],
+        "generated_at": now_utc(),
+    }
+
+
+@app.get("/api/metrics/cc-cape/constituents")
+def api_cc_cape_constituents(
+    request: Request,
+    run_id: int | None = None,
+    limit: int = 500,
+    sort: str = "weight",
+):
+    if limit < 1 or limit > 5000:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 5000")
+
+    sort = (sort or "weight").strip().lower()
+    order_by = "m.weight DESC, m.symbol"
+    if sort == "contribution":
+        order_by = "(m.weight * m.company_cape) DESC, m.symbol"
+    elif sort == "cape":
+        order_by = "m.company_cape DESC, m.symbol"
+    elif sort == "symbol":
+        order_by = "m.symbol"
+    elif sort == "weight":
+        order_by = "m.weight DESC, m.symbol"
+    else:
+        raise HTTPException(status_code=400, detail="sort must be one of: weight, contribution, cape, symbol")
+
+    with _open_conn() as conn:
+        user = _require_api_login(request, conn)
+
+    free_conn = _open_free_data_conn()
+    if free_conn is None:
+        raise HTTPException(status_code=404, detail="Free-data DB not found.")
+
+    with free_conn:
+        run = _get_cc_cape_run(free_conn, run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="No matching CC CAPE run found.")
+
+        rows = free_conn.execute(
+            f"""
+            SELECT m.symbol,
+                   c.security,
+                   m.cik,
+                   m.gics_sector,
+                   m.price_date,
+                   m.close_price,
+                   m.shares_outstanding,
+                   m.market_cap,
+                   m.eps_tag,
+                   m.eps_points,
+                   m.avg_real_eps,
+                   m.company_cape,
+                   m.weight,
+                   (m.weight * m.company_cape) AS contribution
+            FROM cc_cape_constituent_metrics m
+            JOIN cc_cape_runs r ON r.run_id = m.run_id
+            LEFT JOIN sp500_constituents c
+              ON c.symbol = m.symbol AND c.as_of_date = r.as_of_constituents_date
+            WHERE m.run_id = ?
+            ORDER BY {order_by}
+            LIMIT ?
+            """,
+            (run["run_id"], limit),
+        ).fetchall()
+
+    return {
+        "run": _serialize_cc_cape_run(run),
+        "count": len(rows),
+        "constituents": [dict(row) for row in rows],
+        "viewer_role": user["role"],
+        "generated_at": now_utc(),
+    }
+
+
+@app.get("/api/metrics/cc-cape/sectors")
+def api_cc_cape_sectors(request: Request, run_id: int | None = None):
+    with _open_conn() as conn:
+        user = _require_api_login(request, conn)
+
+    free_conn = _open_free_data_conn()
+    if free_conn is None:
+        raise HTTPException(status_code=404, detail="Free-data DB not found.")
+
+    with free_conn:
+        run = _get_cc_cape_run(free_conn, run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="No matching CC CAPE run found.")
+
+        rows = free_conn.execute(
+            """
+            SELECT COALESCE(gics_sector, '(Unknown)') AS sector,
+                   COUNT(*) AS constituents,
+                   SUM(weight) AS weight_sum,
+                   SUM(weight * company_cape) AS contribution,
+                   CASE WHEN SUM(weight) > 0 THEN SUM(weight * company_cape) / SUM(weight) END AS sector_cape
+            FROM cc_cape_constituent_metrics
+            WHERE run_id = ?
+            GROUP BY COALESCE(gics_sector, '(Unknown)')
+            ORDER BY contribution DESC
+            """,
+            (run["run_id"],),
+        ).fetchall()
+
+    return {
+        "run": _serialize_cc_cape_run(run),
+        "count": len(rows),
+        "sectors": [dict(row) for row in rows],
         "viewer_role": user["role"],
         "generated_at": now_utc(),
     }

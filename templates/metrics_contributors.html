@@ -1,0 +1,130 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="issue-header">
+  <div>
+    <h1>Contributors (Latest CC CAPE Run)</h1>
+    <div class="meta-row">Decomposition from <code>cc_cape_constituent_metrics</code></div>
+  </div>
+</section>
+
+{% if not run %}
+  <section class="panel">
+    <p class="muted">No CC CAPE runs found yet.</p>
+    <p class="muted">Run: <code>python3 scripts/calc_cc_cape_free.py --update-tracker</code></p>
+  </section>
+{% else %}
+  <section class="panel">
+    <div class="toolbar" style="margin: 0;">
+      <div>
+        <div><strong>Run ID:</strong> {{ run.run_id }}</div>
+        <div class="muted">Run at {{ run.run_at }} | Price date {{ run.latest_price_date }} | Constituents as-of {{ run.as_of_constituents_date }}</div>
+      </div>
+      <div class="inline-form">
+        <a class="btn btn-secondary" href="/metrics/cc-cape/export/constituents.csv?run_id={{ run.run_id }}">Export constituents CSV</a>
+        <a class="btn btn-secondary" href="/metrics/cc-cape/export/sectors.csv?run_id={{ run.run_id }}">Export sectors CSV</a>
+      </div>
+    </div>
+  </section>
+
+  <section class="issue-layout" style="margin-top: 1rem;">
+    <article class="panel">
+      <h2>Sector Decomposition</h2>
+      {% if sectors|length == 0 %}
+        <p class="muted">none</p>
+      {% else %}
+        <table class="table">
+          <thead>
+            <tr>
+              <th>Sector</th>
+              <th>Constituents</th>
+              <th>Weight</th>
+              <th>Sector CAPE (wtd)</th>
+              <th>Contribution</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for s in sectors %}
+            <tr>
+              <td>{{ s.sector }}</td>
+              <td>{{ s.constituents }}</td>
+              <td>{{ "%.3f"|format(s.weight_sum) }}</td>
+              <td>{{ "%.2f"|format(s.sector_cape) if s.sector_cape is not none else "-" }}</td>
+              <td>{{ "%.3f"|format(s.contribution) }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+        <p class="muted">Contribution = sum(weight * company_cape) per sector (sums to CC CAPE).</p>
+      {% endif %}
+    </article>
+
+    <article class="panel">
+      <h2>Top Constituents (by Weight)</h2>
+      {% if top_constituents|length == 0 %}
+        <p class="muted">none</p>
+      {% else %}
+        <table class="table">
+          <thead>
+            <tr>
+              <th>Symbol</th>
+              <th>Security</th>
+              <th>Sector</th>
+              <th>Weight</th>
+              <th>Company CAPE</th>
+              <th>Contribution</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for c in top_constituents %}
+            <tr>
+              <td><code>{{ c.symbol }}</code></td>
+              <td>{{ c.security if c.security else "-" }}</td>
+              <td>{{ c.gics_sector if c.gics_sector else "-" }}</td>
+              <td>{{ "%.4f"|format(c.weight) }}</td>
+              <td>{{ "%.2f"|format(c.company_cape) }}</td>
+              <td>{{ "%.4f"|format(c.contribution) }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% endif %}
+
+      <h2 style="margin-top: 1.25rem;">Top Constituents (by Contribution)</h2>
+      {% if top_contributors|length == 0 %}
+        <p class="muted">none</p>
+      {% else %}
+        <table class="table">
+          <thead>
+            <tr>
+              <th>Symbol</th>
+              <th>Security</th>
+              <th>Sector</th>
+              <th>Weight</th>
+              <th>Company CAPE</th>
+              <th>Contribution</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for c in top_contributors %}
+            <tr>
+              <td><code>{{ c.symbol }}</code></td>
+              <td>{{ c.security if c.security else "-" }}</td>
+              <td>{{ c.gics_sector if c.gics_sector else "-" }}</td>
+              <td>{{ "%.4f"|format(c.weight) }}</td>
+              <td>{{ "%.2f"|format(c.company_cape) }}</td>
+              <td>{{ "%.4f"|format(c.contribution) }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      {% endif %}
+    </article>
+  </section>
+
+  <section class="panel" style="margin-top: 1rem;">
+    <h2>All Constituents</h2>
+    <div class="muted">API: <code>/api/metrics/cc-cape/constituents?run_id={{ run.run_id }}&limit=500</code></div>
+  </section>
+{% endif %}
+{% endblock %}
+

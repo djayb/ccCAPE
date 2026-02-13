@@ -99,6 +99,7 @@ Available endpoints:
 - `GET /api/issues/{issue_key}`
 - `GET /api/metrics/cc-cape/latest`
 - `GET /api/metrics/cc-cape/runs?limit=N`
+- `GET /api/metrics/cc-cape/series/monthly?limit=N`
 - `GET /api/metrics/cc-cape/constituents?run_id=ID&limit=N&sort=weight|contribution|cape|symbol`
 - `GET /api/metrics/cc-cape/sectors?run_id=ID`
 
@@ -232,3 +233,24 @@ Restart scheduler after changing schedule/env:
 ```bash
 docker compose up --build -d
 ```
+
+## 12. Monthly Series Backfill (Free-Data Proxy)
+
+Backfill a monthly CC CAPE series for "current constituents" (fixed to the latest constituents snapshot):
+
+```bash
+python3 scripts/backfill_cc_cape_series_free.py \
+  --series-years 10 \
+  --lookback-years 10 \
+  --min-eps-points 8 \
+  --update-tracker
+```
+
+This writes into `data/free_data.db`:
+
+- `cc_cape_series_monthly`
+
+And enables:
+
+- `GET /api/metrics/cc-cape/series/monthly`
+- CSV export: `GET /metrics/cc-cape/export/series_monthly.csv`

@@ -79,7 +79,11 @@
 
 <section class="panel" style="margin-top: 1rem;">
   <h2>Time Series</h2>
-  <div class="muted">Last 120 runs (weekly by default). Charts render from <code>/api/metrics/cc-cape/runs</code>.</div>
+  <div class="muted">
+    Charts prefer the backfilled monthly series from <code>/api/metrics/cc-cape/series/monthly</code>
+    (<a href="/metrics/cc-cape/export/series_monthly.csv">export CSV</a>), and fall back to recent runs from
+    <code>/api/metrics/cc-cape/runs</code>.
+  </div>
   <div class="chart-grid" style="margin-top: 0.75rem;">
     <div>
       <div class="muted" style="margin-bottom: 0.35rem;">CC CAPE vs Shiller CAPE</div>
@@ -250,19 +254,51 @@
   async function loadAndRender() {
     const errorEl = document.getElementById("chartError");
     try {
-      const resp = await fetch("/api/metrics/cc-cape/runs?limit=120", {
+      // 1) Prefer monthly backfilled series if present.
+      try {
+        const seriesResp = await fetch("/api/metrics/cc-cape/series/monthly?limit=240", {
+          headers: { Accept: "application/json" },
+        });
+        if (seriesResp.ok) {
+          const payload = await seriesResp.json();
+          const series = (payload && payload.series) ? payload.series : [];
+          if (series.length >= 2) {
+            const labels = series.map((p) => String(p.observation_date || "").slice(0, 10));
+            const cc = series.map((p) => toNumber(p.cc_cape));
+            const shiller = series.map((p) => toNumber(p.shiller_cape));
+            const spread = series.map((p) => toNumber(p.cape_spread));
+
+            drawLineChart(document.getElementById("cccapeChart"), labels, [
+              { name: "CC CAPE", data: cc, color: "#0b6bcb" },
+              { name: "Shiller", data: shiller, color: "#067647" },
+            ], { yDecimals: 1 });
+
+            drawLineChart(document.getElementById("spreadChart"), labels, [
+              { name: "Spread", data: spread, color: "#b42318" },
+            ], { yDecimals: 1 });
+
+            errorEl.textContent = "";
+            return;
+          }
+        }
+      } catch (_ignored) {
+        // fall back to run history
+      }
+
+      // 2) Fall back to run history.
+      const runsResp = await fetch("/api/metrics/cc-cape/runs?limit=120", {
         headers: { Accept: "application/json" },
       });
-      if (!resp.ok) {
-        throw new Error("Failed to load series (" + resp.status + ")");
+      if (!runsResp.ok) {
+        throw new Error("Failed to load series (" + runsResp.status + ")");
       }
-      const payload = await resp.json();
+      const payload = await runsResp.json();
       const runs = (payload && payload.runs) ? payload.runs : [];
       const sorted = runs
         .slice()
-        .sort((a, b) => String(a.run_at || "").localeCompare(String(b.run_at || "")));
+        .sort((a, b) => String(a.latest_price_date || a.run_at || "").localeCompare(String(b.latest_price_date || b.run_at || "")));
 
-      const labels = sorted.map((r) => String(r.run_at || "").slice(0, 10));
+      const labels = sorted.map((r) => String(r.latest_price_date || r.run_at || "").slice(0, 10));
       const cc = sorted.map((r) => toNumber(r.cc_cape));
       const shiller = sorted.map((r) => toNumber(r.shiller_cape));
       const spread = sorted.map((r) => toNumber(r.cape_spread));

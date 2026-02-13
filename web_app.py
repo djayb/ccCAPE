@@ -255,6 +255,14 @@ def _csv_response(filename: str, fieldnames: list[str], rows: list[dict]) -> Res
     )
 
 
+def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table_name,),
+    ).fetchone()
+    return row is not None
+
+
 @app.get("/metrics/cc-cape/contributors", response_class=HTMLResponse)
 def metrics_cc_cape_contributors(request: Request, run_id: int | None = None, top_n: int = 25):
     if top_n < 5 or top_n > 200:
@@ -463,6 +471,95 @@ def export_cc_cape_sectors_csv(request: Request, run_id: int | None = None):
     data = [dict(row) for row in rows]
     fieldnames = ["sector", "constituents", "weight_sum", "sector_cape", "contribution"]
     filename = f"cc_cape_sectors_run_{run['run_id']}.csv"
+    return _csv_response(filename, fieldnames, data)
+
+
+@app.get("/metrics/cc-cape/export/series_monthly.csv")
+def export_cc_cape_series_monthly_csv(
+    request: Request,
+    as_of_constituents_date: str | None = None,
+    lookback_years: int = 10,
+    min_eps_points: int = 8,
+    market_cap_min_coverage: float = 0.8,
+):
+    with _open_conn() as tracker_conn:
+        user, redirect = _require_login(request, tracker_conn)
+        if redirect:
+            return redirect
+
+    free_conn = _open_free_data_conn()
+    if free_conn is None:
+        raise HTTPException(status_code=404, detail="Free-data DB not found.")
+
+    mcap_permille = int(round(market_cap_min_coverage * 1000))
+
+    with free_conn:
+        if not _table_exists(free_conn, "cc_cape_series_monthly"):
+            raise HTTPException(status_code=404, detail="Monthly series not found. Run backfill script first.")
+
+        if not as_of_constituents_date:
+            row = free_conn.execute(
+                "SELECT MAX(as_of_constituents_date) AS as_of_constituents_date FROM cc_cape_series_monthly"
+            ).fetchone()
+            as_of_constituents_date = row["as_of_constituents_date"] if row else None
+
+        if not as_of_constituents_date:
+            raise HTTPException(status_code=404, detail="Monthly series not found. Run backfill script first.")
+
+        rows = free_conn.execute(
+            """
+            SELECT as_of_constituents_date,
+                   observation_date,
+                   cc_cape,
+                   avg_company_cape,
+                   cc_cape_percentile,
+                   cc_cape_zscore,
+                   shiller_cape,
+                   shiller_cape_date,
+                   cape_spread,
+                   cape_spread_percentile,
+                   cape_spread_zscore,
+                   symbols_total,
+                   symbols_with_price,
+                   symbols_with_valid_cape,
+                   weighting_method,
+                   market_cap_coverage,
+                   lookback_years,
+                   min_eps_points,
+                   market_cap_min_coverage_permille
+            FROM cc_cape_series_monthly
+            WHERE as_of_constituents_date = ?
+              AND lookback_years = ?
+              AND min_eps_points = ?
+              AND market_cap_min_coverage_permille = ?
+            ORDER BY observation_date
+            """,
+            (as_of_constituents_date, lookback_years, min_eps_points, mcap_permille),
+        ).fetchall()
+
+    data = [dict(row) for row in rows]
+    fieldnames = [
+        "as_of_constituents_date",
+        "observation_date",
+        "cc_cape",
+        "avg_company_cape",
+        "cc_cape_percentile",
+        "cc_cape_zscore",
+        "shiller_cape",
+        "shiller_cape_date",
+        "cape_spread",
+        "cape_spread_percentile",
+        "cape_spread_zscore",
+        "symbols_total",
+        "symbols_with_price",
+        "symbols_with_valid_cape",
+        "weighting_method",
+        "market_cap_coverage",
+        "lookback_years",
+        "min_eps_points",
+        "market_cap_min_coverage_permille",
+    ]
+    filename = f"cc_cape_series_monthly_{as_of_constituents_date}.csv"
     return _csv_response(filename, fieldnames, data)
 
 
@@ -841,6 +938,84 @@ def api_cc_cape_runs(request: Request, limit: int = 50):
     return {
         "count": len(rows),
         "runs": [_serialize_cc_cape_run(r) for r in rows],
+        "viewer_role": user["role"],
+        "generated_at": now_utc(),
+    }
+
+
+@app.get("/api/metrics/cc-cape/series/monthly")
+def api_cc_cape_series_monthly(
+    request: Request,
+    as_of_constituents_date: str | None = None,
+    lookback_years: int = 10,
+    min_eps_points: int = 8,
+    market_cap_min_coverage: float = 0.8,
+    limit: int = 240,
+):
+    if limit < 1 or limit > 5000:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 5000")
+
+    with _open_conn() as conn:
+        user = _require_api_login(request, conn)
+
+    free_conn = _open_free_data_conn()
+    if free_conn is None:
+        raise HTTPException(status_code=404, detail="Free-data DB not found.")
+
+    mcap_permille = int(round(market_cap_min_coverage * 1000))
+
+    with free_conn:
+        if not _table_exists(free_conn, "cc_cape_series_monthly"):
+            raise HTTPException(status_code=404, detail="Monthly series not found. Run backfill script first.")
+
+        if not as_of_constituents_date:
+            row = free_conn.execute(
+                "SELECT MAX(as_of_constituents_date) AS as_of_constituents_date FROM cc_cape_series_monthly"
+            ).fetchone()
+            as_of_constituents_date = row["as_of_constituents_date"] if row else None
+
+        if not as_of_constituents_date:
+            raise HTTPException(status_code=404, detail="Monthly series not found. Run backfill script first.")
+
+        rows = free_conn.execute(
+            """
+            SELECT as_of_constituents_date,
+                   observation_date,
+                   cc_cape,
+                   avg_company_cape,
+                   cc_cape_percentile,
+                   cc_cape_zscore,
+                   shiller_cape,
+                   shiller_cape_date,
+                   cape_spread,
+                   cape_spread_percentile,
+                   cape_spread_zscore,
+                   symbols_total,
+                   symbols_with_price,
+                   symbols_with_valid_cape,
+                   weighting_method,
+                   market_cap_coverage,
+                   lookback_years,
+                   min_eps_points,
+                   market_cap_min_coverage_permille
+            FROM cc_cape_series_monthly
+            WHERE as_of_constituents_date = ?
+              AND lookback_years = ?
+              AND min_eps_points = ?
+              AND market_cap_min_coverage_permille = ?
+            ORDER BY observation_date
+            LIMIT ?
+            """,
+            (as_of_constituents_date, lookback_years, min_eps_points, mcap_permille, limit),
+        ).fetchall()
+
+    return {
+        "as_of_constituents_date": as_of_constituents_date,
+        "lookback_years": lookback_years,
+        "min_eps_points": min_eps_points,
+        "market_cap_min_coverage_permille": mcap_permille,
+        "count": len(rows),
+        "series": [dict(row) for row in rows],
         "viewer_role": user["role"],
         "generated_at": now_utc(),
     }

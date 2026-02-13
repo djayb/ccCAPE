@@ -85,6 +85,10 @@ SHARES_TAGS = (
     "WeightedAverageNumberOfSharesOutstandingBasic",
 )
 
+# SEC company facts often include multiple contexts per end_date (quarter, YTD, annual).
+# For CAPE we want annual-ish values; filter by period length using start/end dates.
+ANNUAL_PERIOD_DAYS_MIN = 330
+
 
 def ensure_parent_dir(path: str) -> None:
     Path(path).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
@@ -294,6 +298,19 @@ def _dedup_latest_by_end_date(rows: list[sqlite3.Row]) -> dict[str, sqlite3.Row]
         if current is None:
             dedup[end_date] = row
             continue
+        try:
+            current_days = int(current["period_days"] or 0)
+        except (KeyError, IndexError, TypeError, ValueError):
+            current_days = 0
+        try:
+            candidate_days = int(row["period_days"] or 0)
+        except (KeyError, IndexError, TypeError, ValueError):
+            candidate_days = 0
+        if candidate_days > current_days:
+            dedup[end_date] = row
+            continue
+        if candidate_days < current_days:
+            continue
         current_filed = current["filed_date"] or ""
         candidate_filed = row["filed_date"] or ""
         if candidate_filed >= current_filed:
@@ -313,17 +330,26 @@ def eps_candidates(conn: sqlite3.Connection, cik: str) -> list[tuple[str, list[d
 
     rows = conn.execute(
         """
-        SELECT tag, end_date, filed_date, value, form, fiscal_period, unit
+        SELECT tag,
+               start_date,
+               end_date,
+               filed_date,
+               value,
+               form,
+               fiscal_period,
+               unit,
+               CAST(julianday(end_date) - julianday(start_date) AS INT) AS period_days
         FROM company_facts_values
         WHERE cik = ?
           AND tag IN ('EarningsPerShareBasic', 'EarningsPerShareDiluted')
           AND value IS NOT NULL
           AND end_date IS NOT NULL
+          AND start_date IS NOT NULL
           AND (unit LIKE 'USD%' OR unit LIKE 'usd%')
-          AND (form LIKE '10-K%' OR fiscal_period = 'FY')
+          AND CAST(julianday(end_date) - julianday(start_date) AS INT) >= ?
         ORDER BY end_date, filed_date
         """,
-        (cik,),
+        (cik, ANNUAL_PERIOD_DAYS_MIN),
     ).fetchall()
 
     if rows:
@@ -334,10 +360,21 @@ def eps_candidates(conn: sqlite3.Connection, cik: str) -> list[tuple[str, list[d
             if current is None:
                 dedup[key] = row
             else:
-                current_filed = current["filed_date"] or ""
-                candidate_filed = row["filed_date"] or ""
-                if candidate_filed >= current_filed:
+                try:
+                    current_days = int(current["period_days"] or 0)
+                except (TypeError, ValueError):
+                    current_days = 0
+                try:
+                    candidate_days = int(row["period_days"] or 0)
+                except (TypeError, ValueError):
+                    candidate_days = 0
+                if candidate_days > current_days:
                     dedup[key] = row
+                elif candidate_days == current_days:
+                    current_filed = current["filed_date"] or ""
+                    candidate_filed = row["filed_date"] or ""
+                    if candidate_filed >= current_filed:
+                        dedup[key] = row
 
         for tag in EPS_TAGS:
             series = [dict(r) for (t, _), r in dedup.items() if t == tag]
@@ -348,31 +385,47 @@ def eps_candidates(conn: sqlite3.Connection, cik: str) -> list[tuple[str, list[d
     # Fallback: compute EPS = NetIncomeLoss / WeightedAvgSharesBasic when reported EPS is missing.
     net_income_rows = conn.execute(
         """
-        SELECT end_date, filed_date, value, form, fiscal_period, unit
+        SELECT start_date,
+               end_date,
+               filed_date,
+               value,
+               form,
+               fiscal_period,
+               unit,
+               CAST(julianday(end_date) - julianday(start_date) AS INT) AS period_days
         FROM company_facts_values
         WHERE cik = ?
           AND tag = 'NetIncomeLoss'
           AND value IS NOT NULL
           AND end_date IS NOT NULL
+          AND start_date IS NOT NULL
           AND (unit LIKE 'USD%' OR unit LIKE 'usd%')
-          AND (form LIKE '10-K%' OR fiscal_period = 'FY')
+          AND CAST(julianday(end_date) - julianday(start_date) AS INT) >= ?
         ORDER BY end_date, filed_date
         """,
-        (cik,),
+        (cik, ANNUAL_PERIOD_DAYS_MIN),
     ).fetchall()
     shares_rows = conn.execute(
         """
-        SELECT end_date, filed_date, value, form, fiscal_period, unit
+        SELECT start_date,
+               end_date,
+               filed_date,
+               value,
+               form,
+               fiscal_period,
+               unit,
+               CAST(julianday(end_date) - julianday(start_date) AS INT) AS period_days
         FROM company_facts_values
         WHERE cik = ?
           AND tag = 'WeightedAverageNumberOfSharesOutstandingBasic'
           AND value IS NOT NULL
           AND value > 0
           AND end_date IS NOT NULL
-          AND (form LIKE '10-K%' OR fiscal_period = 'FY')
+          AND start_date IS NOT NULL
+          AND CAST(julianday(end_date) - julianday(start_date) AS INT) >= ?
         ORDER BY end_date, filed_date
         """,
-        (cik,),
+        (cik, ANNUAL_PERIOD_DAYS_MIN),
     ).fetchall()
     if net_income_rows and shares_rows:
         net_by_end = _dedup_latest_by_end_date(net_income_rows)
@@ -924,6 +977,8 @@ def run_calculation(args: argparse.Namespace) -> dict[str, Any]:
         latest_price_date = max(metric["price_date"] for metric in metrics)
 
         notes = {
+            "methodology_version": "free-v2-annual-period-filter",
+            "eps_period_days_min": ANNUAL_PERIOD_DAYS_MIN,
             "latest_cpi_date": latest_cpi_date,
             "latest_cpi_value": latest_cpi,
             "skipped_missing_cik": skipped_missing_cik,

@@ -1828,6 +1828,96 @@ def audit_page(request: Request, username: str | None = None, limit: int = 200):
     )
 
 
+@app.get("/admin/analytics", response_class=HTMLResponse)
+def analytics_page(request: Request, days: int = 14):
+    if days < 1 or days > 180:
+        days = 14
+
+    with _open_conn() as conn:
+        user, redirect = _require_login(request, conn)
+        if redirect:
+            return redirect
+        if user["role"] != "admin":
+            return RedirectResponse("/board?error=Admin%20role%20required", status_code=303)
+
+        now = dt.datetime.now(dt.timezone.utc)
+        cutoff = (now - dt.timedelta(days=days)).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+        total = conn.execute(
+            "SELECT COUNT(*) AS c FROM access_audit_logs WHERE occurred_at >= ?",
+            (cutoff,),
+        ).fetchone()["c"]
+        users = conn.execute(
+            "SELECT COUNT(DISTINCT username) AS c FROM access_audit_logs WHERE occurred_at >= ? AND username IS NOT NULL AND username != ''",
+            (cutoff,),
+        ).fetchone()["c"]
+        paths = conn.execute(
+            "SELECT COUNT(DISTINCT path) AS c FROM access_audit_logs WHERE occurred_at >= ?",
+            (cutoff,),
+        ).fetchone()["c"]
+        errors = conn.execute(
+            "SELECT COUNT(*) AS c FROM access_audit_logs WHERE occurred_at >= ? AND status_code >= 400",
+            (cutoff,),
+        ).fetchone()["c"]
+
+        daily = conn.execute(
+            """
+            SELECT substr(occurred_at, 1, 10) AS day,
+                   COUNT(*) AS requests,
+                   COUNT(DISTINCT CASE WHEN username IS NOT NULL AND username != '' THEN username END) AS users,
+                   SUM(CASE WHEN status_code >= 400 THEN 1 ELSE 0 END) AS errors
+            FROM access_audit_logs
+            WHERE occurred_at >= ?
+            GROUP BY substr(occurred_at, 1, 10)
+            ORDER BY day DESC
+            LIMIT 90
+            """,
+            (cutoff,),
+        ).fetchall()
+
+        top_paths = conn.execute(
+            """
+            SELECT path,
+                   COUNT(*) AS requests
+            FROM access_audit_logs
+            WHERE occurred_at >= ?
+            GROUP BY path
+            ORDER BY requests DESC
+            LIMIT 20
+            """,
+            (cutoff,),
+        ).fetchall()
+
+        top_users = conn.execute(
+            """
+            SELECT COALESCE(NULLIF(username, ''), '(anon)') AS username,
+                   COUNT(*) AS requests
+            FROM access_audit_logs
+            WHERE occurred_at >= ?
+            GROUP BY COALESCE(NULLIF(username, ''), '(anon)')
+            ORDER BY requests DESC
+            LIMIT 20
+            """,
+            (cutoff,),
+        ).fetchall()
+
+    return templates.TemplateResponse(
+        "analytics.html",
+        {
+            "request": request,
+            "user": user,
+            "days": days,
+            "since": cutoff[:10],
+            "totals": {"total": int(total or 0), "users": int(users or 0), "paths": int(paths or 0), "errors": int(errors or 0)},
+            "daily": daily,
+            "top_paths": top_paths,
+            "top_users": top_users,
+            "message": request.query_params.get("msg", ""),
+            "error": request.query_params.get("error", ""),
+        },
+    )
+
+
 @app.post("/admin/users")
 def users_create(request: Request, username: str = Form(...), password: str = Form(...), role: str = Form(...)):
     with _open_conn() as conn:

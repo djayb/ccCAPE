@@ -340,6 +340,13 @@ def metrics_cc_cape(request: Request):
     latest_run = dict(latest_run_row) if latest_run_row else None
     runs = [dict(row) for row in runs_rows]
 
+    latest_run_notes: dict[str, object] = {}
+    if latest_run and latest_run.get("notes_json"):
+        try:
+            latest_run_notes = json.loads(latest_run.get("notes_json") or "{}")
+        except Exception:
+            latest_run_notes = {}
+
     latest_ingestion = None
     if ingestion:
         try:
@@ -363,6 +370,7 @@ def metrics_cc_cape(request: Request):
             "request": request,
             "user": user,
             "latest_run": latest_run,
+            "latest_run_notes": latest_run_notes,
             "runs": runs,
             "latest_ingestion": latest_ingestion,
             "message": request.query_params.get("msg", ""),

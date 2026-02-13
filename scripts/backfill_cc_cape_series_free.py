@@ -573,6 +573,17 @@ def compute_and_store_series(args: argparse.Namespace) -> dict[str, Any]:
         if start_obs > end_obs:
             raise RuntimeError("Computed start date is after end date; check --series-years/--end-date.")
 
+        # Avoid doing work for months where no symbols can possibly have prices.
+        # As price history grows (e.g. after backfilling full Stooq history), this clamp moves earlier automatically.
+        min_price_row = conn.execute(
+            "SELECT MIN(price_date) AS min_price_date FROM daily_prices WHERE source = 'stooq'"
+        ).fetchone()
+        min_price_date = parse_date(min_price_row["min_price_date"] if min_price_row else None)
+        if min_price_date is not None:
+            min_obs = month_end(min_price_date)
+            if start_obs < min_obs:
+                start_obs = min_obs
+
         market_cap_min_coverage_permille = int(round(args.market_cap_min_coverage * 1000))
         market_cap_min_coverage = market_cap_min_coverage_permille / 1000.0
 

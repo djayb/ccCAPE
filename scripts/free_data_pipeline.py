@@ -863,13 +863,85 @@ def run_quality_checks(conn: sqlite3.Connection) -> dict[str, Any]:
         "SELECT MAX(observation_date) AS observation_date FROM shiller_cape_observations"
     ).fetchone()["observation_date"]
 
+    max_price_date = conn.execute(
+        "SELECT MAX(price_date) AS price_date FROM daily_prices WHERE source = 'stooq'"
+    ).fetchone()["price_date"]
+
+    max_cpi_date = conn.execute(
+        "SELECT MAX(observation_date) AS observation_date FROM cpi_observations"
+    ).fetchone()["observation_date"]
+
+    max_facts_fetched_at = conn.execute(
+        "SELECT MAX(fetched_at) AS fetched_at FROM company_facts_meta"
+    ).fetchone()["fetched_at"]
+
+    now_date = dt.datetime.now(dt.timezone.utc).date()
+
+    def age_days(date_value: str | None) -> int | None:
+        parsed = None
+        if date_value:
+            try:
+                parsed = dt.date.fromisoformat(date_value[:10])
+            except ValueError:
+                parsed = None
+        if not parsed:
+            return None
+        return (now_date - parsed).days
+
+    def age_days_ts(ts_value: str | None) -> int | None:
+        if not ts_value:
+            return None
+        raw = ts_value.strip()
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        try:
+            parsed = dt.datetime.fromisoformat(raw)
+        except ValueError:
+            return None
+        return (dt.datetime.now(dt.timezone.utc) - parsed).days
+
+    price_age = age_days(max_price_date)
+    cpi_age = age_days(max_cpi_date)
+    shiller_age = age_days(shiller_latest)
+    facts_age = age_days_ts(max_facts_fetched_at)
+
+    warnings: list[str] = []
+    if total_constituents > 0:
+        priced_ratio = (int(latest_price_count or 0) / total_constituents) if total_constituents else 0.0
+        facts_ratio = (int(facts_cik_count or 0) / total_constituents) if total_constituents else 0.0
+        if priced_ratio < 0.85:
+            warnings.append(f"Low price coverage: {latest_price_count}/{total_constituents} symbols ({priced_ratio:.1%}).")
+        if facts_ratio < 0.50:
+            warnings.append(f"Low facts coverage: {facts_cik_count}/{total_constituents} CIKs ({facts_ratio:.1%}).")
+
+    if missing_cik > 20:
+        warnings.append(f"High missing CIK count: {missing_cik}.")
+    if price_age is not None and price_age > 7:
+        warnings.append(f"Prices appear stale: latest {max_price_date} ({price_age} days old).")
+    if cpi_age is not None and cpi_age > 90:
+        warnings.append(f"CPI appears stale: latest {max_cpi_date} ({cpi_age} days old).")
+    if shiller_age is not None and shiller_age > 90:
+        warnings.append(f"Shiller CAPE appears stale: latest {shiller_latest} ({shiller_age} days old).")
+    if facts_age is not None and facts_age > 90:
+        warnings.append(f"Company facts appear stale: latest fetched_at {max_facts_fetched_at} ({facts_age} days old).")
+
+    status = "warning" if warnings else "success"
+
     return {
-        "status": "success",
+        "status": status,
         "constituent_count": total_constituents,
         "missing_cik_count": missing_cik,
         "priced_symbol_count": int(latest_price_count or 0),
         "facts_cik_count": int(facts_cik_count or 0),
         "shiller_latest_observation_date": shiller_latest,
+        "latest_price_date": max_price_date,
+        "latest_cpi_date": max_cpi_date,
+        "latest_facts_fetched_at": max_facts_fetched_at,
+        "price_age_days": price_age,
+        "cpi_age_days": cpi_age,
+        "shiller_age_days": shiller_age,
+        "facts_age_days": facts_age,
+        "warnings": warnings,
     }
 
 
@@ -984,6 +1056,9 @@ def update_tracker_with_summary(
             f"priced symbols {summary['steps']['quality_checks'].get('priced_symbol_count', 0)}, "
             f"facts CIKs {summary['steps']['quality_checks'].get('facts_cik_count', 0)}"
         )
+        warnings = summary.get("steps", {}).get("quality_checks", {}).get("warnings") or []
+        if warnings:
+            body += "\n\nWarnings:\n- " + "\n- ".join(str(item) for item in warnings[:10])
 
         for issue_key in [free_data_issue_key, "CAPE-4", "CAPE-5", "CAPE-6"]:
             if not issue_key:
@@ -1090,7 +1165,7 @@ def run_pipeline(args: argparse.Namespace) -> int:
         summary["completed_at"] = now_utc()
         overall_status = "success"
         for step in summary["steps"].values():
-            if step.get("status") in {"error", "rate_limited", "partial_failure"}:
+            if step.get("status") in {"error", "rate_limited", "warning", "partial_failure"}:
                 overall_status = "partial_failure"
                 break
 

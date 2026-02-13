@@ -73,6 +73,15 @@
         <li>Shiller CAPE: {{ steps.get("shiller_cape", {}).get("status", "-") }} (through {{ steps.get("shiller_cape", {}).get("max_observation_date", "-") }})</li>
         <li>Priced symbols: {{ steps.get("quality_checks", {}).get("priced_symbol_count", "-") }}</li>
       </ul>
+      {% set qc = steps.get("quality_checks", {}) %}
+      {% if qc.get("warnings") %}
+        <div class="muted" style="margin-top: 0.6rem;">Warnings:</div>
+        <ul>
+          {% for w in qc.get("warnings", []) %}
+            <li>{{ w }}</li>
+          {% endfor %}
+        </ul>
+      {% endif %}
     {% endif %}
   </article>
 </section>

@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import time
 
 from fastapi import FastAPI, Request, Form, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
@@ -127,6 +128,50 @@ def startup() -> None:
     with _open_conn() as conn:
         init_db(conn)
         ensure_default_admin(conn)
+
+
+@app.middleware("http")
+async def access_audit_middleware(request: Request, call_next):
+    start = time.time()
+    response = await call_next(request)
+    duration_ms = int((time.time() - start) * 1000)
+
+    try:
+        path = request.url.path
+        if path.startswith("/static"):
+            return response
+
+        username = request.session.get("username")
+        role = request.session.get("role")
+        client_ip = request.client.host if request.client else None
+        user_agent = request.headers.get("user-agent", "")
+
+        with connect(DB_PATH) as conn:
+            conn.execute("PRAGMA busy_timeout = 2000;")
+            conn.execute(
+                """
+                INSERT INTO access_audit_logs
+                (occurred_at, username, role, method, path, status_code, client_ip, user_agent, duration_ms)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    now_utc(),
+                    username,
+                    role,
+                    request.method,
+                    path,
+                    int(getattr(response, "status_code", 0) or 0),
+                    client_ip,
+                    user_agent[:500],
+                    duration_ms,
+                ),
+            )
+            conn.commit()
+    except Exception:
+        # Best-effort audit; never block user flows.
+        pass
+
+    return response
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -1376,6 +1421,54 @@ def users_page(request: Request):
             "user": user,
             "users": users,
             "roles": ROLES,
+            "message": request.query_params.get("msg", ""),
+            "error": request.query_params.get("error", ""),
+        },
+    )
+
+
+@app.get("/admin/audit", response_class=HTMLResponse)
+def audit_page(request: Request, username: str | None = None, limit: int = 200):
+    if limit < 1 or limit > 2000:
+        limit = 200
+
+    with _open_conn() as conn:
+        user, redirect = _require_login(request, conn)
+        if redirect:
+            return redirect
+        if user["role"] != "admin":
+            return RedirectResponse("/board?error=Admin%20role%20required", status_code=303)
+
+        if username:
+            logs = conn.execute(
+                """
+                SELECT occurred_at, username, role, method, path, status_code, client_ip, user_agent, duration_ms
+                FROM access_audit_logs
+                WHERE username = ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (username, limit),
+            ).fetchall()
+        else:
+            logs = conn.execute(
+                """
+                SELECT occurred_at, username, role, method, path, status_code, client_ip, user_agent, duration_ms
+                FROM access_audit_logs
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+
+    return templates.TemplateResponse(
+        "audit.html",
+        {
+            "request": request,
+            "user": user,
+            "logs": logs,
+            "username_filter": username,
+            "limit": limit,
             "message": request.query_params.get("msg", ""),
             "error": request.query_params.get("error", ""),
         },

@@ -267,6 +267,113 @@ def metrics_cc_cape(request: Request):
     )
 
 
+@app.get("/metrics/health", response_class=HTMLResponse)
+def metrics_health(request: Request):
+    with _open_conn() as tracker_conn:
+        user, redirect = _require_login(request, tracker_conn)
+        if redirect:
+            return redirect
+
+    free_conn = _open_free_data_conn()
+    if free_conn is None:
+        return templates.TemplateResponse(
+            "metrics_health.html",
+            {
+                "request": request,
+                "user": user,
+                "pipeline": None,
+                "calc": None,
+                "series": None,
+                "message": request.query_params.get("msg", ""),
+                "error": "Free-data DB not found. Run scripts/free_data_pipeline.py first.",
+            },
+        )
+
+    pipeline_obj = None
+    calc_obj = None
+    series_obj = None
+
+    with free_conn:
+        pipeline = free_conn.execute(
+            """
+            SELECT run_started_at, run_completed_at, status, details_json
+            FROM ingestion_runs
+            WHERE step = 'pipeline'
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        if pipeline:
+            try:
+                details = json.loads(pipeline["details_json"] or "{}")
+            except Exception:
+                details = {}
+            steps = details.get("steps", {}) if isinstance(details, dict) else {}
+            pipeline_obj = {
+                "run_started_at": pipeline["run_started_at"],
+                "run_completed_at": pipeline["run_completed_at"],
+                "status": pipeline["status"],
+                "quality": steps.get("quality_checks", {}) if isinstance(steps, dict) else {},
+            }
+
+        calc = free_conn.execute(
+            """
+            SELECT *
+            FROM cc_cape_runs
+            ORDER BY run_id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        calc_obj = dict(calc) if calc else None
+
+        if _table_exists(free_conn, "cc_cape_series_monthly"):
+            row = free_conn.execute(
+                "SELECT MAX(as_of_constituents_date) AS as_of_constituents_date FROM cc_cape_series_monthly"
+            ).fetchone()
+            as_of = row["as_of_constituents_date"] if row else None
+            if as_of:
+                stats = free_conn.execute(
+                    """
+                    SELECT MIN(observation_date) AS min_observation_date,
+                           MAX(observation_date) AS max_observation_date,
+                           COUNT(*) AS count
+                    FROM cc_cape_series_monthly
+                    WHERE as_of_constituents_date = ?
+                    """,
+                    (as_of,),
+                ).fetchone()
+                latest = free_conn.execute(
+                    """
+                    SELECT cc_cape
+                    FROM cc_cape_series_monthly
+                    WHERE as_of_constituents_date = ?
+                    ORDER BY observation_date DESC
+                    LIMIT 1
+                    """,
+                    (as_of,),
+                ).fetchone()
+                series_obj = {
+                    "as_of_constituents_date": as_of,
+                    "min_observation_date": stats["min_observation_date"] if stats else None,
+                    "max_observation_date": stats["max_observation_date"] if stats else None,
+                    "count": stats["count"] if stats else 0,
+                    "latest_cc_cape": float(latest["cc_cape"]) if latest and latest["cc_cape"] is not None else None,
+                }
+
+    return templates.TemplateResponse(
+        "metrics_health.html",
+        {
+            "request": request,
+            "user": user,
+            "pipeline": pipeline_obj,
+            "calc": calc_obj,
+            "series": series_obj,
+            "message": request.query_params.get("msg", ""),
+            "error": request.query_params.get("error", ""),
+        },
+    )
+
+
 def _get_cc_cape_run(free_conn: sqlite3.Connection, run_id: int | None) -> sqlite3.Row | None:
     if run_id is None:
         return free_conn.execute(

@@ -99,6 +99,28 @@ def run_job(args: argparse.Namespace) -> tuple[int, int]:
 
     pipeline_code = run_command(pipeline_cmd)
     calc_code = run_command(calc_cmd)
+
+    kpi_code = 0
+    if args.kpi_enabled:
+        kpi_cmd = [
+            sys.executable,
+            str(ROOT_DIR / "scripts" / "generate_kpi_report.py"),
+            "--tracker-db",
+            args.tracker_db,
+            "--data-db",
+            args.data_db,
+            "--days",
+            str(args.kpi_days),
+            "--out",
+            args.kpi_markdown_path,
+        ]
+        if args.update_tracker:
+            kpi_cmd.append("--update-tracker")
+        else:
+            kpi_cmd.append("--no-update-tracker")
+        kpi_code = run_command(kpi_cmd)
+    if kpi_code != 0:
+        log("KPI report generation failed (non-zero exit); continuing.")
     return pipeline_code, calc_code
 
 
@@ -135,6 +157,14 @@ def main() -> int:
     shiller_env = os.getenv("WEEKLY_SHILLER_CAPE", "")
     parser.add_argument("--shiller-cape", type=float, default=float(shiller_env) if shiller_env else None)
     parser.add_argument("--calc-markdown-path", default=os.getenv("WEEKLY_CALC_MARKDOWN_PATH", "docs/CC_CAPE_FREE_RUN.md"))
+    parser.add_argument(
+        "--kpi-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=(os.getenv("WEEKLY_KPI_ENABLED", "true").lower() in {"1", "true", "yes"}),
+        help="Generate KPI baseline report after each scheduled run.",
+    )
+    parser.add_argument("--kpi-days", type=int, default=int(os.getenv("WEEKLY_KPI_DAYS", "30")))
+    parser.add_argument("--kpi-markdown-path", default=os.getenv("WEEKLY_KPI_MARKDOWN_PATH", "docs/KPI_BASELINE.md"))
     parser.add_argument(
         "--update-tracker",
         action=argparse.BooleanOptionalAction,

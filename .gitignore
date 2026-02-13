@@ -7,3 +7,4 @@ data/*.db-shm
 data/*.db-wal
 docs/INTERNAL_TRACKER_SNAPSHOT.md
 docs/CC_CAPE_FREE_RUN.md
+docs/KPI_BASELINE.md

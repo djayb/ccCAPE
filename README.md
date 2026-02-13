@@ -260,3 +260,13 @@ And enables:
 
 - `GET /api/metrics/cc-cape/series/monthly`
 - CSV export: `GET /metrics/cc-cape/export/series_monthly.csv`
+
+## 13. KPI Baseline Report
+
+Generate a lightweight ops/adoption baseline report:
+
+```bash
+python3 scripts/generate_kpi_report.py --out docs/KPI_BASELINE.md --update-tracker
+```
+
+This is also run by the weekly scheduler by default (`WEEKLY_KPI_ENABLED=true`).

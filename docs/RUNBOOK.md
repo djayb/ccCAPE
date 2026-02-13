@@ -59,6 +59,12 @@ Key signals:
 - facts coverage (`facts_cik_count`) and warnings
 - latest calculation coverage (`symbols_with_valid_cape / symbols_total`)
 
+Generate a KPI baseline report (markdown):
+
+```bash
+python3 scripts/generate_kpi_report.py --out docs/KPI_BASELINE.md --update-tracker
+```
+
 ## Common Failures and Fixes
 
 ### SEC endpoints return 403
@@ -121,4 +127,3 @@ Suggested approach:
 
 - Change the default admin password immediately.
 - Treat the tracker as internal-only; it is not hardened for internet exposure.
-

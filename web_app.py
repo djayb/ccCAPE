@@ -1249,32 +1249,36 @@ def api_cc_cape_series_monthly(
 
         rows = free_conn.execute(
             """
-            SELECT as_of_constituents_date,
-                   observation_date,
-                   cc_cape,
-                   avg_company_cape,
-                   cc_cape_percentile,
-                   cc_cape_zscore,
-                   shiller_cape,
-                   shiller_cape_date,
-                   cape_spread,
-                   cape_spread_percentile,
-                   cape_spread_zscore,
-                   symbols_total,
-                   symbols_with_price,
-                   symbols_with_valid_cape,
-                   weighting_method,
-                   market_cap_coverage,
-                   lookback_years,
-                   min_eps_points,
-                   market_cap_min_coverage_permille
-            FROM cc_cape_series_monthly
-            WHERE as_of_constituents_date = ?
-              AND lookback_years = ?
-              AND min_eps_points = ?
-              AND market_cap_min_coverage_permille = ?
+            SELECT *
+            FROM (
+                SELECT as_of_constituents_date,
+                       observation_date,
+                       cc_cape,
+                       avg_company_cape,
+                       cc_cape_percentile,
+                       cc_cape_zscore,
+                       shiller_cape,
+                       shiller_cape_date,
+                       cape_spread,
+                       cape_spread_percentile,
+                       cape_spread_zscore,
+                       symbols_total,
+                       symbols_with_price,
+                       symbols_with_valid_cape,
+                       weighting_method,
+                       market_cap_coverage,
+                       lookback_years,
+                       min_eps_points,
+                       market_cap_min_coverage_permille
+                FROM cc_cape_series_monthly
+                WHERE as_of_constituents_date = ?
+                  AND lookback_years = ?
+                  AND min_eps_points = ?
+                  AND market_cap_min_coverage_permille = ?
+                ORDER BY observation_date DESC
+                LIMIT ?
+            )
             ORDER BY observation_date
-            LIMIT ?
             """,
             (as_of_constituents_date, lookback_years, min_eps_points, mcap_permille, limit),
         ).fetchall()

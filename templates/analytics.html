@@ -1,0 +1,103 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="issue-header">
+  <div>
+    <h1>Usage Analytics</h1>
+    <div class="meta-row">Aggregated from <code>access_audit_logs</code> (admin only).</div>
+  </div>
+</section>
+
+<section class="panel">
+  <form class="inline-form" method="get" action="/admin/analytics">
+    <label class="muted">Days</label>
+    <input name="days" value="{{ days }}" style="width: 6rem;" />
+    <button class="btn btn-primary" type="submit">Apply</button>
+  </form>
+</section>
+
+<section class="issue-layout" style="margin-top: 1rem;">
+  <article class="panel">
+    <h2>Summary</h2>
+    <p><strong>Since:</strong> {{ since }}</p>
+    <p><strong>Total requests:</strong> {{ totals.total }}</p>
+    <p><strong>Unique users:</strong> {{ totals.users }}</p>
+    <p><strong>Unique paths:</strong> {{ totals.paths }}</p>
+    <p><strong>Errors (>=400):</strong> {{ totals.errors }}</p>
+  </article>
+
+  <article class="panel">
+    <h2>Top Paths</h2>
+    {% if top_paths|length == 0 %}
+      <p class="muted">none</p>
+    {% else %}
+      <table class="table">
+        <thead>
+          <tr>
+            <th>Path</th>
+            <th>Requests</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in top_paths %}
+          <tr>
+            <td><code>{{ row.path }}</code></td>
+            <td>{{ row.requests }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% endif %}
+
+    <h2 style="margin-top: 1.25rem;">Top Users</h2>
+    {% if top_users|length == 0 %}
+      <p class="muted">none</p>
+    {% else %}
+      <table class="table">
+        <thead>
+          <tr>
+            <th>User</th>
+            <th>Requests</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for row in top_users %}
+          <tr>
+            <td><code>{{ row.username }}</code></td>
+            <td>{{ row.requests }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% endif %}
+  </article>
+</section>
+
+<section class="panel" style="margin-top: 1rem;">
+  <h2>Daily Activity</h2>
+  {% if daily|length == 0 %}
+    <p class="muted">none</p>
+  {% else %}
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Day</th>
+          <th>Requests</th>
+          <th>Unique Users</th>
+          <th>Errors</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in daily %}
+        <tr>
+          <td>{{ row.day }}</td>
+          <td>{{ row.requests }}</td>
+          <td>{{ row.users }}</td>
+          <td>{{ row.errors }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% endif %}
+</section>
+{% endblock %}
+

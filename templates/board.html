@@ -1,0 +1,41 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="toolbar">
+  <form method="get" action="/board" class="inline-form">
+    <label for="project">Project</label>
+    <select id="project" name="project" onchange="this.form.submit()">
+      {% for p in projects %}
+      <option value="{{ p.key }}" {% if p.key == selected_project %}selected{% endif %}>{{ p.key }} - {{ p.name }}</option>
+      {% endfor %}
+    </select>
+  </form>
+  {% if project_row %}
+  <div class="muted">{{ project_row.key }}: {{ project_row.name }}</div>
+  {% endif %}
+</section>
+
+<section class="board-grid">
+  {% for status in statuses %}
+  <article class="column">
+    <header class="column-title">{{ status_labels[status] }}</header>
+    <div class="cards">
+      {% if grouped[status]|length == 0 %}
+      <div class="empty">No issues</div>
+      {% endif %}
+      {% for issue in grouped[status] %}
+      <a class="card" href="/issue/{{ issue.key }}">
+        <div class="card-top">
+          <strong>{{ issue.key }}</strong>
+          <span class="pill">{{ priority_labels[issue.priority] }}</span>
+        </div>
+        <div class="card-title">{{ issue.title }}</div>
+        <div class="card-meta">Epic: {{ issue.epic_key if issue.epic_key else "-" }}</div>
+        <div class="card-meta">Assignee: {{ issue.assignee if issue.assignee else "unassigned" }}</div>
+        <div class="card-meta">Due: {{ issue.due_date if issue.due_date else "-" }}</div>
+      </a>
+      {% endfor %}
+    </div>
+  </article>
+  {% endfor %}
+</section>
+{% endblock %}

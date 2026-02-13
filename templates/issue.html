@@ -1,0 +1,106 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="issue-header">
+  <div>
+    <h1>{{ issue.key }} - {{ issue.title }}</h1>
+    <div class="meta-row">Project: {{ project_row.key }} | Epic: {{ issue.epic_key if issue.epic_key else "-" }} | Type: {{ issue.type }}</div>
+  </div>
+  <a class="btn btn-secondary" href="/board?project={{ project_row.key }}">Back to Board</a>
+</section>
+
+<section class="issue-layout">
+  <article class="panel">
+    <h2>Details</h2>
+    <p><strong>Status:</strong> {{ status_labels[issue.status] }}</p>
+    <p><strong>Priority:</strong> {{ priority_labels[issue.priority] }}</p>
+    <p><strong>Assignee:</strong> {{ issue.assignee if issue.assignee else "-" }}</p>
+    <p><strong>Sprint:</strong> {{ issue.sprint if issue.sprint else "-" }}</p>
+    <p><strong>Due:</strong> {{ issue.due_date if issue.due_date else "-" }}</p>
+    <p><strong>Story Points:</strong> {{ issue.story_points if issue.story_points is not none else "-" }}</p>
+    <p><strong>Updated:</strong> {{ issue.updated_at }}</p>
+    <h3>Description</h3>
+    <p>{{ issue.description if issue.description else "-" }}</p>
+
+    {% if can_edit %}
+    <hr />
+    <h3>Update Status</h3>
+    <form method="post" action="/issue/{{ issue.key }}/status" class="inline-form">
+      <select name="status" required>
+        {% for s in statuses %}
+        <option value="{{ s }}" {% if s == issue.status %}selected{% endif %}>{{ status_labels[s] }}</option>
+        {% endfor %}
+      </select>
+      <button type="submit" class="btn btn-primary">Update</button>
+    </form>
+
+    <h3>Update Assignee</h3>
+    <form method="post" action="/issue/{{ issue.key }}/assignee" class="inline-form">
+      <input name="assignee" value="{{ issue.assignee if issue.assignee else '' }}" placeholder="username" />
+      <button type="submit" class="btn btn-primary">Save</button>
+    </form>
+
+    <h3>Add Dependency</h3>
+    <form method="post" action="/issue/{{ issue.key }}/dependency" class="inline-form">
+      <input name="depends_on" placeholder="CAPE-2" required />
+      <button type="submit" class="btn btn-primary">Link</button>
+    </form>
+
+    <h3>Add Comment</h3>
+    <form method="post" action="/issue/{{ issue.key }}/comment" class="stack-form">
+      <textarea name="body" rows="4" required></textarea>
+      <button type="submit" class="btn btn-primary">Add Comment</button>
+    </form>
+    {% endif %}
+  </article>
+
+  <article class="panel">
+    <h2>Dependencies</h2>
+    <h3>Depends On</h3>
+    <ul>
+      {% if deps|length == 0 %}
+      <li>none</li>
+      {% endif %}
+      {% for dep in deps %}
+      <li><a href="/issue/{{ dep.key }}">{{ dep.key }}</a> ({{ status_labels[dep.status] }}) - {{ dep.title }}</li>
+      {% endfor %}
+    </ul>
+
+    <h3>Blocks</h3>
+    <ul>
+      {% if blocked_by|length == 0 %}
+      <li>none</li>
+      {% endif %}
+      {% for item in blocked_by %}
+      <li><a href="/issue/{{ item.key }}">{{ item.key }}</a> ({{ status_labels[item.status] }}) - {{ item.title }}</li>
+      {% endfor %}
+    </ul>
+
+    <h2>Comments</h2>
+    <ul>
+      {% if comments|length == 0 %}
+      <li>none</li>
+      {% endif %}
+      {% for c in comments %}
+      <li><strong>{{ c.author }}</strong> <span class="muted">{{ c.created_at }}</span><br />{{ c.body }}</li>
+      {% endfor %}
+    </ul>
+
+    <h2>Recent Events</h2>
+    <ul>
+      {% if events|length == 0 %}
+      <li>none</li>
+      {% endif %}
+      {% for e in events %}
+      <li>
+        <span class="muted">{{ e.created_at }}</span>
+        {{ e.event_type }}
+        {% if e.old_value or e.new_value %}
+        ({{ e.old_value if e.old_value else "-" }} -> {{ e.new_value if e.new_value else "-" }})
+        {% endif %}
+        by {{ e.actor if e.actor else "-" }}
+      </li>
+      {% endfor %}
+    </ul>
+  </article>
+</section>
+{% endblock %}

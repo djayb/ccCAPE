@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>{{ title if title else "CC CAPE Tracker" }}</title>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">CC CAPE Internal Tracker</div>
+      {% if user %}
+      <nav class="topnav">
+        <a href="/board">Board</a>
+        {% if user.role == "admin" %}
+        <a href="/admin/users">Users</a>
+        {% endif %}
+      </nav>
+      <div class="session">
+        <span class="pill">{{ user.username }} ({{ user.role }})</span>
+        <form method="post" action="/logout">
+          <button type="submit" class="btn btn-secondary">Sign Out</button>
+        </form>
+      </div>
+      {% endif %}
+    </header>
+
+    <main class="page">
+      {% if message %}
+      <div class="alert alert-ok">{{ message }}</div>
+      {% endif %}
+      {% if error %}
+      <div class="alert alert-error">{{ error }}</div>
+      {% endif %}
+      {% block content %}{% endblock %}
+    </main>
+  </body>
+</html>

@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Login - CC CAPE Tracker</title>
+    <link rel="stylesheet" href="/static/style.css" />
+  </head>
+  <body class="login-body">
+    <main class="login-card">
+      <h1>CC CAPE Internal Tracker</h1>
+      <p class="muted">Sign in to access the board.</p>
+
+      {% if message %}
+      <div class="alert alert-ok">{{ message }}</div>
+      {% endif %}
+      {% if error %}
+      <div class="alert alert-error">{{ error }}</div>
+      {% endif %}
+
+      <form method="post" action="/login" class="stack-form">
+        <label>Username</label>
+        <input name="username" required />
+        <label>Password</label>
+        <input type="password" name="password" required />
+        <button type="submit" class="btn btn-primary">Sign In</button>
+      </form>
+
+      <p class="hint">Default local admin: <code>admin</code> / <code>admin123</code></p>
+    </main>
+  </body>
+</html>

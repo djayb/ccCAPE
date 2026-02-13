@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="issue-header">
+  <h1>User Administration</h1>
+</section>
+
+<section class="issue-layout">
+  <article class="panel">
+    <h2>Create User</h2>
+    <form method="post" action="/admin/users" class="stack-form">
+      <label>Username</label>
+      <input name="username" required />
+      <label>Password</label>
+      <input type="password" name="password" required />
+      <label>Role</label>
+      <select name="role" required>
+        {% for role in roles %}
+        <option value="{{ role }}">{{ role }}</option>
+        {% endfor %}
+      </select>
+      <button type="submit" class="btn btn-primary">Create</button>
+    </form>
+  </article>
+
+  <article class="panel">
+    <h2>Users</h2>
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Username</th>
+          <th>Role</th>
+          <th>Active</th>
+          <th>Created</th>
+          <th>Action</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for u in users %}
+        <tr>
+          <td>{{ u.username }}</td>
+          <td>{{ u.role }}</td>
+          <td>{{ "yes" if u.active else "no" }}</td>
+          <td>{{ u.created_at }}</td>
+          <td>
+            <form method="post" action="/admin/users/{{ u.username }}/active" class="inline-form">
+              <select name="active">
+                <option value="yes" {% if u.active %}selected{% endif %}>yes</option>
+                <option value="no" {% if not u.active %}selected{% endif %}>no</option>
+              </select>
+              <button class="btn btn-secondary" type="submit">Save</button>
+            </form>
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </article>
+</section>
+{% endblock %}

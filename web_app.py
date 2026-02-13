@@ -534,9 +534,32 @@ def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
 
 
 @app.get("/metrics/cc-cape/contributors", response_class=HTMLResponse)
-def metrics_cc_cape_contributors(request: Request, run_id: int | None = None, top_n: int = 25):
+def metrics_cc_cape_contributors(
+    request: Request,
+    run_id: int | None = None,
+    top_n: int = 25,
+    sort: str = "weight",
+    q: str = "",
+    limit: int = 503,
+):
     if top_n < 5 or top_n > 200:
         top_n = 25
+    if limit < 5 or limit > 5000:
+        limit = 503
+
+    sort = (sort or "weight").strip().lower()
+    order_by = "m.weight DESC, m.symbol"
+    if sort == "contribution":
+        order_by = "(m.weight * m.company_cape) DESC, m.symbol"
+    elif sort == "cape":
+        order_by = "m.company_cape DESC, m.symbol"
+    elif sort == "symbol":
+        order_by = "m.symbol"
+    elif sort == "weight":
+        order_by = "m.weight DESC, m.symbol"
+    else:
+        sort = "weight"
+        order_by = "m.weight DESC, m.symbol"
 
     with _open_conn() as tracker_conn:
         user, redirect = _require_login(request, tracker_conn)
@@ -554,6 +577,10 @@ def metrics_cc_cape_contributors(request: Request, run_id: int | None = None, to
                 "sectors": [],
                 "top_constituents": [],
                 "top_contributors": [],
+                "all_constituents": [],
+                "sort": sort,
+                "q": (q or "").strip(),
+                "limit": limit,
                 "message": request.query_params.get("msg", ""),
                 "error": "Free-data DB not found. Run scripts/free_data_pipeline.py first.",
             },
@@ -571,6 +598,10 @@ def metrics_cc_cape_contributors(request: Request, run_id: int | None = None, to
                     "sectors": [],
                     "top_constituents": [],
                     "top_contributors": [],
+                    "all_constituents": [],
+                    "sort": sort,
+                    "q": (q or "").strip(),
+                    "limit": limit,
                     "message": request.query_params.get("msg", ""),
                     "error": request.query_params.get("error", "No matching CC CAPE run found."),
                 },
@@ -629,6 +660,40 @@ def metrics_cc_cape_contributors(request: Request, run_id: int | None = None, to
             (run["run_id"], top_n),
         ).fetchall()
 
+        q_norm = (q or "").strip()
+        where_extra = ""
+        params: list[object] = [run["run_id"]]
+        if q_norm:
+            like = f"%{q_norm.replace('%', '')}%"
+            where_extra = " AND (m.symbol LIKE ? OR c.security LIKE ? OR m.gics_sector LIKE ?)"
+            params.extend([like, like, like])
+        params.append(limit)
+
+        all_constituents = free_conn.execute(
+            f"""
+            SELECT m.symbol,
+                   c.security,
+                   m.gics_sector,
+                   m.weight,
+                   m.company_cape,
+                   (m.weight * m.company_cape) AS contribution,
+                   m.eps_tag,
+                   m.eps_points,
+                   m.price_date,
+                   m.close_price,
+                   m.market_cap
+            FROM cc_cape_constituent_metrics m
+            JOIN cc_cape_runs r ON r.run_id = m.run_id
+            LEFT JOIN sp500_constituents c
+              ON c.symbol = m.symbol AND c.as_of_date = r.as_of_constituents_date
+            WHERE m.run_id = ?
+            {where_extra}
+            ORDER BY {order_by}
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+
     return templates.TemplateResponse(
         "metrics_contributors.html",
         {
@@ -638,6 +703,10 @@ def metrics_cc_cape_contributors(request: Request, run_id: int | None = None, to
             "sectors": sectors,
             "top_constituents": top_constituents,
             "top_contributors": top_contributors,
+            "all_constituents": all_constituents,
+            "sort": sort,
+            "q": q_norm,
+            "limit": limit,
             "message": request.query_params.get("msg", ""),
             "error": request.query_params.get("error", ""),
         },

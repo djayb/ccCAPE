@@ -1,0 +1,56 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="issue-header">
+  <div>
+    <h1>Access Audit Logs</h1>
+    <div class="meta-row">Tracks page/API access (method, path, status, user).</div>
+  </div>
+</section>
+
+<section class="panel">
+  <form class="inline-form" method="get" action="/admin/audit">
+    <label class="muted">Username</label>
+    <input name="username" value="{{ username_filter if username_filter else '' }}" placeholder="(any)" />
+    <label class="muted">Limit</label>
+    <input name="limit" value="{{ limit }}" style="width: 6rem;" />
+    <button class="btn btn-primary" type="submit">Filter</button>
+    <a class="btn btn-secondary" href="/admin/audit">Reset</a>
+  </form>
+</section>
+
+<section class="panel" style="margin-top: 1rem;">
+  {% if logs|length == 0 %}
+    <p class="muted">none</p>
+  {% else %}
+    <table class="table">
+      <thead>
+        <tr>
+          <th>At</th>
+          <th>User</th>
+          <th>Role</th>
+          <th>Method</th>
+          <th>Path</th>
+          <th>Status</th>
+          <th>IP</th>
+          <th>ms</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for row in logs %}
+        <tr>
+          <td>{{ row.occurred_at }}</td>
+          <td>{{ row.username if row.username else '-' }}</td>
+          <td>{{ row.role if row.role else '-' }}</td>
+          <td><code>{{ row.method }}</code></td>
+          <td><code>{{ row.path }}</code></td>
+          <td>{{ row.status_code if row.status_code is not none else '-' }}</td>
+          <td>{{ row.client_ip if row.client_ip else '-' }}</td>
+          <td>{{ row.duration_ms if row.duration_ms is not none else '-' }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% endif %}
+</section>
+{% endblock %}
+

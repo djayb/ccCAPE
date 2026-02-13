@@ -47,6 +47,7 @@ SEC_TICKER_MAP_URL = "https://www.sec.gov/files/company_tickers_exchange.json"
 SEC_COMPANY_FACTS_URL_TMPL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
 FRED_CPI_CSV_URL = "https://fred.stlouisfed.org/graph/fredgraph.csv?id=CPIAUCSL"
 STOOQ_DAILY_URL_TMPL = "https://stooq.com/q/d/l/?s={symbol}.us&i=d"
+MULTPL_SHILLER_PE_URL = "https://www.multpl.com/shiller-pe/table/by-month"
 
 DEFAULT_TAGS = (
     "NetIncomeLoss",
@@ -85,6 +86,13 @@ CREATE TABLE IF NOT EXISTS sec_ticker_map (
 CREATE TABLE IF NOT EXISTS cpi_observations (
     observation_date TEXT PRIMARY KEY,
     cpi_value REAL NOT NULL,
+    source_url TEXT NOT NULL,
+    ingested_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS shiller_cape_observations (
+    observation_date TEXT PRIMARY KEY,
+    shiller_cape REAL NOT NULL,
     source_url TEXT NOT NULL,
     ingested_at TEXT NOT NULL
 );
@@ -433,6 +441,72 @@ def fetch_fred_cpi_csv(session: requests.Session, conn: sqlite3.Connection) -> d
     }
 
 
+def parse_multpl_shiller_pe_table(html: str) -> list[tuple[str, float]]:
+    soup = BeautifulSoup(html, "html.parser")
+    table = soup.find("table")
+    if table is None:
+        raise PipelineError("Could not find Shiller PE table on Multpl page.")
+
+    observations: list[tuple[str, float]] = []
+    for tr in table.find_all("tr"):
+        cols = [cell.get_text(" ", strip=True) for cell in tr.find_all(["th", "td"])]
+        if len(cols) != 2:
+            continue
+        if cols[0].lower() == "date":
+            continue
+
+        date_raw, value_raw = cols
+        date_raw = date_raw.strip()
+        value_raw = value_raw.strip().replace(",", "")
+        if not date_raw or not value_raw:
+            continue
+        try:
+            parsed_date = dt.datetime.strptime(date_raw, "%b %d, %Y").date()
+        except ValueError:
+            continue
+        try:
+            value = float(value_raw)
+        except ValueError:
+            continue
+        observations.append((parsed_date.isoformat(), value))
+
+    if not observations:
+        raise PipelineError("No Shiller PE observations parsed from Multpl table.")
+    return observations
+
+
+def fetch_shiller_cape_multpl(session: requests.Session, conn: sqlite3.Connection) -> dict[str, Any]:
+    response = session.get(MULTPL_SHILLER_PE_URL, timeout=45)
+    response.raise_for_status()
+
+    observations = parse_multpl_shiller_pe_table(response.text)
+    ts = now_utc()
+    inserted = 0
+    for obs_date, value in observations:
+        conn.execute(
+            """
+            INSERT INTO shiller_cape_observations (observation_date, shiller_cape, source_url, ingested_at)
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(observation_date)
+            DO UPDATE SET
+                shiller_cape = excluded.shiller_cape,
+                source_url = excluded.source_url,
+                ingested_at = excluded.ingested_at
+            """,
+            (obs_date, value, MULTPL_SHILLER_PE_URL, ts),
+        )
+        inserted += 1
+
+    conn.commit()
+    dates = [d for d, _ in observations]
+    return {
+        "status": "success",
+        "records": inserted,
+        "min_observation_date": min(dates),
+        "max_observation_date": max(dates),
+    }
+
+
 def stooq_symbol_variants(symbol: str) -> list[str]:
     base = symbol.lower()
     variants = [
@@ -454,13 +528,17 @@ def fetch_symbol_prices_stooq(
     *,
     symbol: str,
     max_rows: int | None,
-) -> tuple[int, str | None]:
+) -> tuple[int, str | None, bool]:
     for variant in stooq_symbol_variants(symbol):
         url = STOOQ_DAILY_URL_TMPL.format(symbol=variant)
         response = session.get(url, timeout=45)
+        if response.status_code == 429:
+            return 0, None, True
         if response.status_code != 200:
             continue
         body = response.text.strip()
+        if "Exceeded the daily hits limit" in body:
+            return 0, None, True
         if not body or body.startswith("No data"):
             continue
         reader = csv.DictReader(body.splitlines())
@@ -479,8 +557,8 @@ def fetch_symbol_prices_stooq(
             continue
         if max_rows is not None and max_rows > 0:
             parsed = parsed[-max_rows:]
-        return len(parsed), body
-    return 0, None
+        return len(parsed), body, False
+    return 0, None, False
 
 
 def persist_symbol_prices(
@@ -530,16 +608,32 @@ def fetch_prices_stooq(
     max_rows_per_symbol: int,
     request_delay: float,
 ) -> dict[str, Any]:
-    selected_symbols = symbols[:symbol_limit] if symbol_limit > 0 else symbols
+    existing = {
+        normalize_symbol(row["symbol"])
+        for row in conn.execute(
+            "SELECT DISTINCT symbol FROM daily_prices WHERE source = 'stooq'"
+        ).fetchall()
+    }
+    missing_symbols = [normalize_symbol(sym) for sym in symbols if normalize_symbol(sym) not in existing]
+    existing_symbols = [normalize_symbol(sym) for sym in symbols if normalize_symbol(sym) in existing]
+    ordered_symbols = missing_symbols + existing_symbols
+
+    selected_symbols = ordered_symbols[:symbol_limit] if symbol_limit > 0 else ordered_symbols
     inserted_rows = 0
     failures = []
+    rate_limited = False
+    rate_limit_symbol: str | None = None
 
     for idx, symbol in enumerate(selected_symbols, start=1):
-        count, body = fetch_symbol_prices_stooq(
+        count, body, limited = fetch_symbol_prices_stooq(
             session,
             symbol=symbol,
             max_rows=max_rows_per_symbol if max_rows_per_symbol > 0 else None,
         )
+        if limited:
+            rate_limited = True
+            rate_limit_symbol = symbol
+            break
         if count == 0 or body is None:
             failures.append(symbol)
         else:
@@ -554,11 +648,13 @@ def fetch_prices_stooq(
 
     conn.commit()
     return {
-        "status": "success",
+        "status": "rate_limited" if rate_limited else "success",
         "symbols_requested": len(selected_symbols),
+        "symbols_processed": idx if selected_symbols else 0,
         "rows_written": inserted_rows,
         "symbol_failures": len(failures),
         "failed_symbols": failures[:20],
+        "rate_limit_symbol": rate_limit_symbol,
     }
 
 
@@ -596,6 +692,7 @@ def fetch_company_facts(
     cik_limit: int,
     request_delay: float,
     selected_tags: tuple[str, ...],
+    stale_days: int,
 ) -> dict[str, Any]:
     target = []
     missing_cik = []
@@ -605,8 +702,49 @@ def fetch_company_facts(
             missing_cik.append(row["symbol"])
             continue
         target.append((row["symbol"], cik_value))
+
+    def parse_utc_ts(value: str | None) -> dt.datetime | None:
+        if not value:
+            return None
+        raw = value.strip()
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        try:
+            return dt.datetime.fromisoformat(raw)
+        except ValueError:
+            return None
+
+    meta_rows = conn.execute("SELECT cik, fetched_at FROM company_facts_meta").fetchall()
+    fetched_map: dict[str, str] = {}
+    for meta in meta_rows:
+        cik_key = normalize_cik(meta["cik"]) or ""
+        if not cik_key:
+            continue
+        fetched_map[cik_key] = meta["fetched_at"] or ""
+
+    now_dt = dt.datetime.now(dt.timezone.utc)
+    missing_in_db: list[tuple[str, str]] = []
+    stale_in_db: list[tuple[str, str, str]] = []
+    fresh_in_db: list[tuple[str, str, str]] = []
+
+    for symbol, cik_value in target:
+        cik_norm = normalize_cik(cik_value) or ""
+        fetched_at = fetched_map.get(cik_norm)
+        if not fetched_at:
+            missing_in_db.append((symbol, cik_value))
+            continue
+        fetched_dt = parse_utc_ts(fetched_at)
+        if stale_days > 0 and fetched_dt and (now_dt - fetched_dt) > dt.timedelta(days=stale_days):
+            stale_in_db.append((symbol, cik_value, fetched_at))
+        else:
+            fresh_in_db.append((symbol, cik_value, fetched_at))
+
+    stale_in_db.sort(key=lambda item: item[2])
+    fresh_in_db.sort(key=lambda item: item[2])
+    prioritized = missing_in_db + [(s, c) for (s, c, _) in stale_in_db] + [(s, c) for (s, c, _) in fresh_in_db]
+
     if cik_limit > 0:
-        target = target[:cik_limit]
+        prioritized = prioritized[:cik_limit]
 
     tag_set = set(selected_tags)
     ts = now_utc()
@@ -614,7 +752,7 @@ def fetch_company_facts(
     failed = []
     observations_written = 0
 
-    for idx, (symbol, cik_value) in enumerate(target, start=1):
+    for idx, (symbol, cik_value) in enumerate(prioritized, start=1):
         url = SEC_COMPANY_FACTS_URL_TMPL.format(cik=cik10(cik_value))
         response = session.get(url, timeout=45)
         if response.status_code != 200:
@@ -690,11 +828,17 @@ def fetch_company_facts(
         "cik_resolved": len(target),
         "missing_cik": len(missing_cik),
         "missing_cik_symbols": missing_cik[:25],
+        "facts_candidates": len(target),
+        "facts_selected": len(prioritized),
+        "facts_missing_in_db": len(missing_in_db),
+        "facts_stale_in_db": len(stale_in_db),
+        "facts_fresh_in_db": len(fresh_in_db),
         "facts_fetched": fetched,
         "facts_failed": len(failed),
         "failed_examples": failed[:10],
         "observations_written": observations_written,
         "selected_tags": list(selected_tags),
+        "stale_days": stale_days,
     }
 
 
@@ -715,12 +859,89 @@ def run_quality_checks(conn: sqlite3.Connection) -> dict[str, Any]:
         "SELECT COUNT(DISTINCT cik) AS count_cik FROM company_facts_meta"
     ).fetchone()["count_cik"]
 
+    shiller_latest = conn.execute(
+        "SELECT MAX(observation_date) AS observation_date FROM shiller_cape_observations"
+    ).fetchone()["observation_date"]
+
+    max_price_date = conn.execute(
+        "SELECT MAX(price_date) AS price_date FROM daily_prices WHERE source = 'stooq'"
+    ).fetchone()["price_date"]
+
+    max_cpi_date = conn.execute(
+        "SELECT MAX(observation_date) AS observation_date FROM cpi_observations"
+    ).fetchone()["observation_date"]
+
+    max_facts_fetched_at = conn.execute(
+        "SELECT MAX(fetched_at) AS fetched_at FROM company_facts_meta"
+    ).fetchone()["fetched_at"]
+
+    now_date = dt.datetime.now(dt.timezone.utc).date()
+
+    def age_days(date_value: str | None) -> int | None:
+        parsed = None
+        if date_value:
+            try:
+                parsed = dt.date.fromisoformat(date_value[:10])
+            except ValueError:
+                parsed = None
+        if not parsed:
+            return None
+        return (now_date - parsed).days
+
+    def age_days_ts(ts_value: str | None) -> int | None:
+        if not ts_value:
+            return None
+        raw = ts_value.strip()
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        try:
+            parsed = dt.datetime.fromisoformat(raw)
+        except ValueError:
+            return None
+        return (dt.datetime.now(dt.timezone.utc) - parsed).days
+
+    price_age = age_days(max_price_date)
+    cpi_age = age_days(max_cpi_date)
+    shiller_age = age_days(shiller_latest)
+    facts_age = age_days_ts(max_facts_fetched_at)
+
+    warnings: list[str] = []
+    if total_constituents > 0:
+        priced_ratio = (int(latest_price_count or 0) / total_constituents) if total_constituents else 0.0
+        facts_ratio = (int(facts_cik_count or 0) / total_constituents) if total_constituents else 0.0
+        if priced_ratio < 0.85:
+            warnings.append(f"Low price coverage: {latest_price_count}/{total_constituents} symbols ({priced_ratio:.1%}).")
+        if facts_ratio < 0.50:
+            warnings.append(f"Low facts coverage: {facts_cik_count}/{total_constituents} CIKs ({facts_ratio:.1%}).")
+
+    if missing_cik > 20:
+        warnings.append(f"High missing CIK count: {missing_cik}.")
+    if price_age is not None and price_age > 7:
+        warnings.append(f"Prices appear stale: latest {max_price_date} ({price_age} days old).")
+    if cpi_age is not None and cpi_age > 90:
+        warnings.append(f"CPI appears stale: latest {max_cpi_date} ({cpi_age} days old).")
+    if shiller_age is not None and shiller_age > 90:
+        warnings.append(f"Shiller CAPE appears stale: latest {shiller_latest} ({shiller_age} days old).")
+    if facts_age is not None and facts_age > 90:
+        warnings.append(f"Company facts appear stale: latest fetched_at {max_facts_fetched_at} ({facts_age} days old).")
+
+    status = "warning" if warnings else "success"
+
     return {
-        "status": "success",
+        "status": status,
         "constituent_count": total_constituents,
         "missing_cik_count": missing_cik,
         "priced_symbol_count": int(latest_price_count or 0),
         "facts_cik_count": int(facts_cik_count or 0),
+        "shiller_latest_observation_date": shiller_latest,
+        "latest_price_date": max_price_date,
+        "latest_cpi_date": max_cpi_date,
+        "latest_facts_fetched_at": max_facts_fetched_at,
+        "price_age_days": price_age,
+        "cpi_age_days": cpi_age,
+        "shiller_age_days": shiller_age,
+        "facts_age_days": facts_age,
+        "warnings": warnings,
     }
 
 
@@ -824,6 +1045,8 @@ def update_tracker_with_summary(
             f"({summary['steps']['sec_ticker_map'].get('records', 0)} rows)\n"
             f"CPI: {summary['steps']['cpi'].get('status')} "
             f"({summary['steps']['cpi'].get('records', 0)} rows)\n"
+            f"Shiller CAPE: {summary['steps'].get('shiller_cape', {}).get('status')} "
+            f"(through {summary['steps'].get('shiller_cape', {}).get('max_observation_date', '-')})\n"
             f"Company facts: {summary['steps']['company_facts'].get('facts_fetched', 0)} fetched, "
             f"{summary['steps']['company_facts'].get('facts_failed', 0)} failed, "
             f"{summary['steps']['company_facts'].get('missing_cik', 0)} missing CIK\n"
@@ -833,6 +1056,18 @@ def update_tracker_with_summary(
             f"priced symbols {summary['steps']['quality_checks'].get('priced_symbol_count', 0)}, "
             f"facts CIKs {summary['steps']['quality_checks'].get('facts_cik_count', 0)}"
         )
+        warnings = []
+        warnings.extend(summary.get("warnings") or [])
+        warnings.extend(summary.get("steps", {}).get("quality_checks", {}).get("warnings") or [])
+        deduped = []
+        seen = set()
+        for item in warnings:
+            text = str(item)
+            if text and text not in seen:
+                seen.add(text)
+                deduped.append(text)
+        if deduped:
+            body += "\n\nWarnings:\n- " + "\n- ".join(deduped[:10])
 
         for issue_key in [free_data_issue_key, "CAPE-4", "CAPE-5", "CAPE-6"]:
             if not issue_key:
@@ -868,14 +1103,35 @@ def build_session(user_agent: str) -> requests.Session:
     return session
 
 
+def looks_like_placeholder_user_agent(user_agent: str) -> bool:
+    ua = (user_agent or "").strip().lower()
+    if not ua:
+        return True
+    placeholders = (
+        "replace-with-your-email",
+        "research@localhost",
+        "localhost",
+        "@example.com",
+    )
+    return any(token in ua for token in placeholders)
+
+
 def run_pipeline(args: argparse.Namespace) -> int:
     run_started_at = now_utc()
-    session = build_session(args.sec_user_agent)
     summary: dict[str, Any] = {
         "started_at": run_started_at,
         "completed_at": None,
         "steps": {},
+        "warnings": [],
     }
+
+    if looks_like_placeholder_user_agent(args.sec_user_agent) and not args.allow_placeholder_user_agent:
+        summary["warnings"].append(
+            "SEC_USER_AGENT looks like a placeholder. Set a real contact User-Agent for SEC fair-access compliance "
+            "(e.g. \"ccCAPE/0.1 (your-name your-email@company.com)\")."
+        )
+
+    session = build_session(args.sec_user_agent)
 
     with connect_data_db(args.data_db) as conn:
         init_data_db(conn)
@@ -908,6 +1164,7 @@ def run_pipeline(args: argparse.Namespace) -> int:
         run_step("constituents", lambda: fetch_sp500_constituents(session, conn))
         run_step("sec_ticker_map", lambda: fetch_sec_ticker_map(session, conn))
         run_step("cpi", lambda: fetch_fred_cpi_csv(session, conn))
+        run_step("shiller_cape", lambda: fetch_shiller_cape_multpl(session, conn))
 
         constituents = load_latest_constituents(conn)
         run_step(
@@ -919,6 +1176,7 @@ def run_pipeline(args: argparse.Namespace) -> int:
                 cik_limit=args.facts_limit,
                 request_delay=args.request_delay,
                 selected_tags=tuple(args.sec_tags),
+                stale_days=args.facts_stale_days,
             ),
         )
         run_step(
@@ -934,12 +1192,28 @@ def run_pipeline(args: argparse.Namespace) -> int:
         )
         run_step("quality_checks", lambda: run_quality_checks(conn))
 
+        # Merge pipeline-level warnings into quality checks so the UI can surface them.
+        qc_step = summary.get("steps", {}).get("quality_checks")
+        if isinstance(qc_step, dict) and summary.get("warnings"):
+            qc_warnings = list(qc_step.get("warnings") or [])
+            for warning in summary.get("warnings") or []:
+                if warning not in qc_warnings:
+                    qc_warnings.insert(0, warning)
+            qc_step["warnings"] = qc_warnings
+            if qc_warnings and qc_step.get("status") == "success":
+                qc_step["status"] = "warning"
+
         summary["completed_at"] = now_utc()
         overall_status = "success"
-        for step in summary["steps"].values():
-            if step.get("status") == "error":
-                overall_status = "partial_failure"
-                break
+        statuses = [step.get("status", "success") for step in summary.get("steps", {}).values() if isinstance(step, dict)]
+        if any(status == "error" for status in statuses):
+            overall_status = "error"
+        elif any(status == "rate_limited" for status in statuses):
+            overall_status = "rate_limited"
+        elif any(status == "warning" for status in statuses):
+            overall_status = "warning"
+        elif any(status == "partial_failure" for status in statuses):
+            overall_status = "partial_failure"
 
         record_step_run(
             conn,
@@ -973,7 +1247,19 @@ def build_parser() -> argparse.ArgumentParser:
         default=os.getenv("SEC_USER_AGENT", "ccCAPE/0.1 (research@localhost)"),
         help="User-Agent header for SEC requests.",
     )
+    parser.add_argument(
+        "--allow-placeholder-user-agent",
+        action="store_true",
+        default=False,
+        help="Bypass User-Agent validation (not recommended).",
+    )
     parser.add_argument("--facts-limit", type=int, default=25, help="Max number of CIKs to fetch per run.")
+    parser.add_argument(
+        "--facts-stale-days",
+        type=int,
+        default=30,
+        help="Refetch company facts if last fetched more than N days ago (0 disables staleness refresh).",
+    )
     parser.add_argument("--prices-symbol-limit", type=int, default=100, help="Max number of symbols for price fetch.")
     parser.add_argument(
         "--prices-rows-per-symbol",

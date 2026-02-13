@@ -3,13 +3,17 @@
 
 from __future__ import annotations
 
+import csv
+import datetime as dt
+import io
+import json
 import os
 from pathlib import Path
 import sqlite3
-import json
+import time
 
 from fastapi import FastAPI, Request, Form, HTTPException
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.middleware.sessions import SessionMiddleware
@@ -37,11 +41,43 @@ DB_PATH = os.environ.get("TRACKER_DB", "data/internal_jira.db")
 FREE_DATA_DB_PATH = os.environ.get("FREE_DATA_DB", "data/free_data.db")
 SESSION_SECRET = os.environ.get("TRACKER_SESSION_SECRET", "replace-this-secret")
 BASE_DIR = Path(__file__).resolve().parent
+DOCS_DIR = BASE_DIR / "docs"
 
-app = FastAPI(title="CC CAPE Internal Tracker")
+app = FastAPI(
+    title="CC CAPE Internal Tracker",
+    docs_url="/api/docs",
+    redoc_url="/api/redoc",
+    openapi_url="/api/openapi.json",
+)
 app.add_middleware(SessionMiddleware, secret_key=SESSION_SECRET, same_site="lax")
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
+
+
+def _serialize_cc_cape_run(row: sqlite3.Row) -> dict:
+    data = dict(row)
+    return {
+        "run_id": data.get("run_id"),
+        "run_at": data.get("run_at"),
+        "as_of_constituents_date": data.get("as_of_constituents_date"),
+        "latest_price_date": data.get("latest_price_date"),
+        "cc_cape": data.get("cc_cape"),
+        "avg_company_cape": data.get("avg_company_cape"),
+        "cc_cape_percentile": data.get("cc_cape_percentile"),
+        "cc_cape_zscore": data.get("cc_cape_zscore"),
+        "symbols_total": data.get("symbols_total"),
+        "symbols_with_price": data.get("symbols_with_price"),
+        "symbols_with_valid_cape": data.get("symbols_with_valid_cape"),
+        "weighting_method": data.get("weighting_method"),
+        "market_cap_coverage": data.get("market_cap_coverage"),
+        "lookback_years": data.get("lookback_years"),
+        "min_eps_points": data.get("min_eps_points"),
+        "shiller_cape": data.get("shiller_cape"),
+        "shiller_cape_date": data.get("shiller_cape_date"),
+        "cape_spread": data.get("cape_spread"),
+        "cape_spread_percentile": data.get("cape_spread_percentile"),
+        "cape_spread_zscore": data.get("cape_spread_zscore"),
+    }
 
 
 def _open_conn():
@@ -101,6 +137,50 @@ def startup() -> None:
         ensure_default_admin(conn)
 
 
+@app.middleware("http")
+async def access_audit_middleware(request: Request, call_next):
+    start = time.time()
+    response = await call_next(request)
+    duration_ms = int((time.time() - start) * 1000)
+
+    try:
+        path = request.url.path
+        if path.startswith("/static"):
+            return response
+
+        username = request.session.get("username")
+        role = request.session.get("role")
+        client_ip = request.client.host if request.client else None
+        user_agent = request.headers.get("user-agent", "")
+
+        with connect(DB_PATH) as conn:
+            conn.execute("PRAGMA busy_timeout = 2000;")
+            conn.execute(
+                """
+                INSERT INTO access_audit_logs
+                (occurred_at, username, role, method, path, status_code, client_ip, user_agent, duration_ms)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    now_utc(),
+                    username,
+                    role,
+                    request.method,
+                    path,
+                    int(getattr(response, "status_code", 0) or 0),
+                    client_ip,
+                    user_agent[:500],
+                    duration_ms,
+                ),
+            )
+            conn.commit()
+    except Exception:
+        # Best-effort audit; never block user flows.
+        pass
+
+    return response
+
+
 @app.get("/", response_class=HTMLResponse)
 def root() -> RedirectResponse:
     return RedirectResponse("/board", status_code=303)
@@ -109,6 +189,103 @@ def root() -> RedirectResponse:
 @app.get("/metrics", response_class=HTMLResponse)
 def metrics_redirect() -> RedirectResponse:
     return RedirectResponse("/metrics/cc-cape", status_code=303)
+
+
+def _resolve_docs_path(relpath: str) -> Path:
+    """Resolve a user-provided docs path safely inside DOCS_DIR."""
+    if not relpath:
+        raise HTTPException(status_code=400, detail="Missing doc path.")
+    if relpath.startswith(("/", "\\")):
+        raise HTTPException(status_code=400, detail="Invalid doc path.")
+    if ".." in relpath.replace("\\", "/").split("/"):
+        raise HTTPException(status_code=400, detail="Invalid doc path.")
+
+    root = DOCS_DIR.resolve()
+    candidate = (DOCS_DIR / relpath).resolve()
+    if candidate == root or root not in candidate.parents:
+        raise HTTPException(status_code=400, detail="Invalid doc path.")
+    if candidate.suffix.lower() not in {".md", ".txt"}:
+        raise HTTPException(status_code=400, detail="Unsupported doc type.")
+    if not candidate.exists() or not candidate.is_file():
+        raise HTTPException(status_code=404, detail="Doc not found.")
+    return candidate
+
+
+@app.get("/docs", response_class=HTMLResponse)
+def docs_index(request: Request):
+    with _open_conn() as tracker_conn:
+        user, redirect = _require_login(request, tracker_conn)
+        if redirect:
+            return redirect
+
+    docs: list[dict[str, str]] = []
+    if DOCS_DIR.exists():
+        for path in sorted(DOCS_DIR.glob("*.md")):
+            try:
+                stat = path.stat()
+                mtime = dt.datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M")
+                docs.append(
+                    {
+                        "name": path.name,
+                        "relpath": path.name,
+                        "size_kb": f"{int(stat.st_size / 1024)}",
+                        "mtime": mtime,
+                    }
+                )
+            except OSError:
+                continue
+
+    return templates.TemplateResponse(
+        "docs_index.html",
+        {
+            "request": request,
+            "user": user,
+            "docs": docs,
+            "message": request.query_params.get("msg", ""),
+            "error": request.query_params.get("err", ""),
+        },
+    )
+
+
+@app.get("/docs/view/{doc_path:path}", response_class=HTMLResponse)
+def docs_view(request: Request, doc_path: str):
+    with _open_conn() as tracker_conn:
+        user, redirect = _require_login(request, tracker_conn)
+        if redirect:
+            return redirect
+
+    path = _resolve_docs_path(doc_path)
+    try:
+        content = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        raise HTTPException(status_code=500, detail="Failed to read doc.")
+
+    return templates.TemplateResponse(
+        "docs_view.html",
+        {
+            "request": request,
+            "user": user,
+            "doc_name": path.name,
+            "relpath": doc_path,
+            "content": content,
+        },
+    )
+
+
+@app.get("/docs/raw/{doc_path:path}")
+def docs_raw(request: Request, doc_path: str):
+    with _open_conn() as tracker_conn:
+        user, redirect = _require_login(request, tracker_conn)
+        if redirect:
+            return redirect
+
+    path = _resolve_docs_path(doc_path)
+    try:
+        content = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        raise HTTPException(status_code=500, detail="Failed to read doc.")
+
+    return Response(content, media_type="text/plain; charset=utf-8")
 
 
 @app.get("/metrics/cc-cape", response_class=HTMLResponse)
@@ -134,7 +311,7 @@ def metrics_cc_cape(request: Request):
         )
 
     with free_conn:
-        latest_run = free_conn.execute(
+        latest_run_row = free_conn.execute(
             """
             SELECT *
             FROM cc_cape_runs
@@ -142,10 +319,9 @@ def metrics_cc_cape(request: Request):
             LIMIT 1
             """
         ).fetchone()
-        runs = free_conn.execute(
+        runs_rows = free_conn.execute(
             """
-            SELECT run_id, run_at, cc_cape, symbols_total, symbols_with_price, symbols_with_valid_cape,
-                   weighting_method, market_cap_coverage, lookback_years, min_eps_points
+            SELECT *
             FROM cc_cape_runs
             ORDER BY run_id DESC
             LIMIT 30
@@ -160,6 +336,9 @@ def metrics_cc_cape(request: Request):
             LIMIT 1
             """
         ).fetchone()
+
+    latest_run = dict(latest_run_row) if latest_run_row else None
+    runs = [dict(row) for row in runs_rows]
 
     latest_ingestion = None
     if ingestion:
@@ -190,6 +369,468 @@ def metrics_cc_cape(request: Request):
             "error": request.query_params.get("error", ""),
         },
     )
+
+
+@app.get("/metrics/health", response_class=HTMLResponse)
+def metrics_health(request: Request):
+    with _open_conn() as tracker_conn:
+        user, redirect = _require_login(request, tracker_conn)
+        if redirect:
+            return redirect
+
+    free_conn = _open_free_data_conn()
+    if free_conn is None:
+        return templates.TemplateResponse(
+            "metrics_health.html",
+            {
+                "request": request,
+                "user": user,
+                "pipeline": None,
+                "calc": None,
+                "series": None,
+                "message": request.query_params.get("msg", ""),
+                "error": "Free-data DB not found. Run scripts/free_data_pipeline.py first.",
+            },
+        )
+
+    pipeline_obj = None
+    calc_obj = None
+    series_obj = None
+
+    with free_conn:
+        pipeline = free_conn.execute(
+            """
+            SELECT run_started_at, run_completed_at, status, details_json
+            FROM ingestion_runs
+            WHERE step = 'pipeline'
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        if pipeline:
+            try:
+                details = json.loads(pipeline["details_json"] or "{}")
+            except Exception:
+                details = {}
+            steps = details.get("steps", {}) if isinstance(details, dict) else {}
+            pipeline_obj = {
+                "run_started_at": pipeline["run_started_at"],
+                "run_completed_at": pipeline["run_completed_at"],
+                "status": pipeline["status"],
+                "quality": steps.get("quality_checks", {}) if isinstance(steps, dict) else {},
+            }
+
+        calc = free_conn.execute(
+            """
+            SELECT *
+            FROM cc_cape_runs
+            ORDER BY run_id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        calc_obj = dict(calc) if calc else None
+
+        if _table_exists(free_conn, "cc_cape_series_monthly"):
+            row = free_conn.execute(
+                "SELECT MAX(as_of_constituents_date) AS as_of_constituents_date FROM cc_cape_series_monthly"
+            ).fetchone()
+            as_of = row["as_of_constituents_date"] if row else None
+            if as_of:
+                stats = free_conn.execute(
+                    """
+                    SELECT MIN(observation_date) AS min_observation_date,
+                           MAX(observation_date) AS max_observation_date,
+                           COUNT(*) AS count
+                    FROM cc_cape_series_monthly
+                    WHERE as_of_constituents_date = ?
+                    """,
+                    (as_of,),
+                ).fetchone()
+                latest = free_conn.execute(
+                    """
+                    SELECT cc_cape
+                    FROM cc_cape_series_monthly
+                    WHERE as_of_constituents_date = ?
+                    ORDER BY observation_date DESC
+                    LIMIT 1
+                    """,
+                    (as_of,),
+                ).fetchone()
+                series_obj = {
+                    "as_of_constituents_date": as_of,
+                    "min_observation_date": stats["min_observation_date"] if stats else None,
+                    "max_observation_date": stats["max_observation_date"] if stats else None,
+                    "count": stats["count"] if stats else 0,
+                    "latest_cc_cape": float(latest["cc_cape"]) if latest and latest["cc_cape"] is not None else None,
+                }
+
+    kpi_report = None
+    kpi_path = DOCS_DIR / "KPI_BASELINE.md"
+    if kpi_path.exists():
+        try:
+            stat = kpi_path.stat()
+            kpi_report = {
+                "relpath": kpi_path.name,
+                "size_kb": f"{int(stat.st_size / 1024)}",
+                "mtime": dt.datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M"),
+            }
+        except OSError:
+            kpi_report = None
+
+    return templates.TemplateResponse(
+        "metrics_health.html",
+        {
+            "request": request,
+            "user": user,
+            "pipeline": pipeline_obj,
+            "calc": calc_obj,
+            "series": series_obj,
+            "kpi_report": kpi_report,
+            "message": request.query_params.get("msg", ""),
+            "error": request.query_params.get("error", ""),
+        },
+    )
+
+
+def _get_cc_cape_run(free_conn: sqlite3.Connection, run_id: int | None) -> sqlite3.Row | None:
+    if run_id is None:
+        return free_conn.execute(
+            """
+            SELECT *
+            FROM cc_cape_runs
+            ORDER BY run_id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    return free_conn.execute(
+        """
+        SELECT *
+        FROM cc_cape_runs
+        WHERE run_id = ?
+        """,
+        (run_id,),
+    ).fetchone()
+
+
+def _csv_response(filename: str, fieldnames: list[str], rows: list[dict]) -> Response:
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=fieldnames, extrasaction="ignore")
+    writer.writeheader()
+    for row in rows:
+        writer.writerow(row)
+    return Response(
+        content=buf.getvalue(),
+        media_type="text/csv; charset=utf-8",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+def _table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+        (table_name,),
+    ).fetchone()
+    return row is not None
+
+
+@app.get("/metrics/cc-cape/contributors", response_class=HTMLResponse)
+def metrics_cc_cape_contributors(request: Request, run_id: int | None = None, top_n: int = 25):
+    if top_n < 5 or top_n > 200:
+        top_n = 25
+
+    with _open_conn() as tracker_conn:
+        user, redirect = _require_login(request, tracker_conn)
+        if redirect:
+            return redirect
+
+    free_conn = _open_free_data_conn()
+    if free_conn is None:
+        return templates.TemplateResponse(
+            "metrics_contributors.html",
+            {
+                "request": request,
+                "user": user,
+                "run": None,
+                "sectors": [],
+                "top_constituents": [],
+                "top_contributors": [],
+                "message": request.query_params.get("msg", ""),
+                "error": "Free-data DB not found. Run scripts/free_data_pipeline.py first.",
+            },
+        )
+
+    with free_conn:
+        run = _get_cc_cape_run(free_conn, run_id)
+        if not run:
+            return templates.TemplateResponse(
+                "metrics_contributors.html",
+                {
+                    "request": request,
+                    "user": user,
+                    "run": None,
+                    "sectors": [],
+                    "top_constituents": [],
+                    "top_contributors": [],
+                    "message": request.query_params.get("msg", ""),
+                    "error": request.query_params.get("error", "No matching CC CAPE run found."),
+                },
+            )
+
+        sectors = free_conn.execute(
+            """
+            SELECT COALESCE(gics_sector, '(Unknown)') AS sector,
+                   COUNT(*) AS constituents,
+                   SUM(weight) AS weight_sum,
+                   SUM(weight * company_cape) AS contribution,
+                   CASE WHEN SUM(weight) > 0 THEN SUM(weight * company_cape) / SUM(weight) END AS sector_cape
+            FROM cc_cape_constituent_metrics
+            WHERE run_id = ?
+            GROUP BY COALESCE(gics_sector, '(Unknown)')
+            ORDER BY contribution DESC
+            """,
+            (run["run_id"],),
+        ).fetchall()
+
+        top_constituents = free_conn.execute(
+            """
+            SELECT m.symbol,
+                   c.security,
+                   m.gics_sector,
+                   m.weight,
+                   m.company_cape,
+                   (m.weight * m.company_cape) AS contribution
+            FROM cc_cape_constituent_metrics m
+            JOIN cc_cape_runs r ON r.run_id = m.run_id
+            LEFT JOIN sp500_constituents c
+              ON c.symbol = m.symbol AND c.as_of_date = r.as_of_constituents_date
+            WHERE m.run_id = ?
+            ORDER BY m.weight DESC
+            LIMIT ?
+            """,
+            (run["run_id"], top_n),
+        ).fetchall()
+
+        top_contributors = free_conn.execute(
+            """
+            SELECT m.symbol,
+                   c.security,
+                   m.gics_sector,
+                   m.weight,
+                   m.company_cape,
+                   (m.weight * m.company_cape) AS contribution
+            FROM cc_cape_constituent_metrics m
+            JOIN cc_cape_runs r ON r.run_id = m.run_id
+            LEFT JOIN sp500_constituents c
+              ON c.symbol = m.symbol AND c.as_of_date = r.as_of_constituents_date
+            WHERE m.run_id = ?
+            ORDER BY (m.weight * m.company_cape) DESC
+            LIMIT ?
+            """,
+            (run["run_id"], top_n),
+        ).fetchall()
+
+    return templates.TemplateResponse(
+        "metrics_contributors.html",
+        {
+            "request": request,
+            "user": user,
+            "run": run,
+            "sectors": sectors,
+            "top_constituents": top_constituents,
+            "top_contributors": top_contributors,
+            "message": request.query_params.get("msg", ""),
+            "error": request.query_params.get("error", ""),
+        },
+    )
+
+
+@app.get("/metrics/cc-cape/export/constituents.csv")
+def export_cc_cape_constituents_csv(request: Request, run_id: int | None = None):
+    with _open_conn() as tracker_conn:
+        user, redirect = _require_login(request, tracker_conn)
+        if redirect:
+            return redirect
+
+    free_conn = _open_free_data_conn()
+    if free_conn is None:
+        raise HTTPException(status_code=404, detail="Free-data DB not found.")
+
+    with free_conn:
+        run = _get_cc_cape_run(free_conn, run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="No CC CAPE runs found.")
+
+        rows = free_conn.execute(
+            """
+            SELECT m.symbol,
+                   c.security,
+                   m.cik,
+                   m.gics_sector,
+                   m.price_date,
+                   m.close_price,
+                   m.shares_outstanding,
+                   m.market_cap,
+                   m.eps_tag,
+                   m.eps_points,
+                   m.avg_real_eps,
+                   m.company_cape,
+                   m.weight,
+                   (m.weight * m.company_cape) AS contribution
+            FROM cc_cape_constituent_metrics m
+            JOIN cc_cape_runs r ON r.run_id = m.run_id
+            LEFT JOIN sp500_constituents c
+              ON c.symbol = m.symbol AND c.as_of_date = r.as_of_constituents_date
+            WHERE m.run_id = ?
+            ORDER BY m.weight DESC, m.symbol
+            """,
+            (run["run_id"],),
+        ).fetchall()
+
+    data = [dict(row) for row in rows]
+    fieldnames = [
+        "symbol",
+        "security",
+        "cik",
+        "gics_sector",
+        "price_date",
+        "close_price",
+        "shares_outstanding",
+        "market_cap",
+        "eps_tag",
+        "eps_points",
+        "avg_real_eps",
+        "company_cape",
+        "weight",
+        "contribution",
+    ]
+    filename = f"cc_cape_constituents_run_{run['run_id']}.csv"
+    return _csv_response(filename, fieldnames, data)
+
+
+@app.get("/metrics/cc-cape/export/sectors.csv")
+def export_cc_cape_sectors_csv(request: Request, run_id: int | None = None):
+    with _open_conn() as tracker_conn:
+        user, redirect = _require_login(request, tracker_conn)
+        if redirect:
+            return redirect
+
+    free_conn = _open_free_data_conn()
+    if free_conn is None:
+        raise HTTPException(status_code=404, detail="Free-data DB not found.")
+
+    with free_conn:
+        run = _get_cc_cape_run(free_conn, run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="No CC CAPE runs found.")
+
+        rows = free_conn.execute(
+            """
+            SELECT COALESCE(gics_sector, '(Unknown)') AS sector,
+                   COUNT(*) AS constituents,
+                   SUM(weight) AS weight_sum,
+                   SUM(weight * company_cape) AS contribution,
+                   CASE WHEN SUM(weight) > 0 THEN SUM(weight * company_cape) / SUM(weight) END AS sector_cape
+            FROM cc_cape_constituent_metrics
+            WHERE run_id = ?
+            GROUP BY COALESCE(gics_sector, '(Unknown)')
+            ORDER BY contribution DESC
+            """,
+            (run["run_id"],),
+        ).fetchall()
+
+    data = [dict(row) for row in rows]
+    fieldnames = ["sector", "constituents", "weight_sum", "sector_cape", "contribution"]
+    filename = f"cc_cape_sectors_run_{run['run_id']}.csv"
+    return _csv_response(filename, fieldnames, data)
+
+
+@app.get("/metrics/cc-cape/export/series_monthly.csv")
+def export_cc_cape_series_monthly_csv(
+    request: Request,
+    as_of_constituents_date: str | None = None,
+    lookback_years: int = 10,
+    min_eps_points: int = 8,
+    market_cap_min_coverage: float = 0.8,
+):
+    with _open_conn() as tracker_conn:
+        user, redirect = _require_login(request, tracker_conn)
+        if redirect:
+            return redirect
+
+    free_conn = _open_free_data_conn()
+    if free_conn is None:
+        raise HTTPException(status_code=404, detail="Free-data DB not found.")
+
+    mcap_permille = int(round(market_cap_min_coverage * 1000))
+
+    with free_conn:
+        if not _table_exists(free_conn, "cc_cape_series_monthly"):
+            raise HTTPException(status_code=404, detail="Monthly series not found. Run backfill script first.")
+
+        if not as_of_constituents_date:
+            row = free_conn.execute(
+                "SELECT MAX(as_of_constituents_date) AS as_of_constituents_date FROM cc_cape_series_monthly"
+            ).fetchone()
+            as_of_constituents_date = row["as_of_constituents_date"] if row else None
+
+        if not as_of_constituents_date:
+            raise HTTPException(status_code=404, detail="Monthly series not found. Run backfill script first.")
+
+        rows = free_conn.execute(
+            """
+            SELECT as_of_constituents_date,
+                   observation_date,
+                   cc_cape,
+                   avg_company_cape,
+                   cc_cape_percentile,
+                   cc_cape_zscore,
+                   shiller_cape,
+                   shiller_cape_date,
+                   cape_spread,
+                   cape_spread_percentile,
+                   cape_spread_zscore,
+                   symbols_total,
+                   symbols_with_price,
+                   symbols_with_valid_cape,
+                   weighting_method,
+                   market_cap_coverage,
+                   lookback_years,
+                   min_eps_points,
+                   market_cap_min_coverage_permille
+            FROM cc_cape_series_monthly
+            WHERE as_of_constituents_date = ?
+              AND lookback_years = ?
+              AND min_eps_points = ?
+              AND market_cap_min_coverage_permille = ?
+            ORDER BY observation_date
+            """,
+            (as_of_constituents_date, lookback_years, min_eps_points, mcap_permille),
+        ).fetchall()
+
+    data = [dict(row) for row in rows]
+    fieldnames = [
+        "as_of_constituents_date",
+        "observation_date",
+        "cc_cape",
+        "avg_company_cape",
+        "cc_cape_percentile",
+        "cc_cape_zscore",
+        "shiller_cape",
+        "shiller_cape_date",
+        "cape_spread",
+        "cape_spread_percentile",
+        "cape_spread_zscore",
+        "symbols_total",
+        "symbols_with_price",
+        "symbols_with_valid_cape",
+        "weighting_method",
+        "market_cap_coverage",
+        "lookback_years",
+        "min_eps_points",
+        "market_cap_min_coverage_permille",
+    ]
+    filename = f"cc_cape_series_monthly_{as_of_constituents_date}.csv"
+    return _csv_response(filename, fieldnames, data)
 
 
 @app.get("/login", response_class=HTMLResponse)
@@ -535,23 +1176,10 @@ def api_cc_cape_latest(request: Request):
     if not row:
         raise HTTPException(status_code=404, detail="No CC CAPE runs found.")
 
-    return {
-        "run_id": row["run_id"],
-        "run_at": row["run_at"],
-        "cc_cape": row["cc_cape"],
-        "avg_company_cape": row["avg_company_cape"],
-        "symbols_total": row["symbols_total"],
-        "symbols_with_price": row["symbols_with_price"],
-        "symbols_with_valid_cape": row["symbols_with_valid_cape"],
-        "lookback_years": row["lookback_years"],
-        "min_eps_points": row["min_eps_points"],
-        "weighting_method": row["weighting_method"],
-        "market_cap_coverage": row["market_cap_coverage"],
-        "shiller_cape": row["shiller_cape"],
-        "cape_spread": row["cape_spread"],
-        "viewer_role": user["role"],
-        "generated_at": now_utc(),
-    }
+    payload = _serialize_cc_cape_run(row)
+    payload["viewer_role"] = user["role"]
+    payload["generated_at"] = now_utc()
+    return payload
 
 
 @app.get("/api/metrics/cc-cape/runs")
@@ -569,9 +1197,7 @@ def api_cc_cape_runs(request: Request, limit: int = 50):
     with free_conn:
         rows = free_conn.execute(
             """
-            SELECT run_id, run_at, cc_cape, avg_company_cape, symbols_total, symbols_with_price,
-                   symbols_with_valid_cape, weighting_method, market_cap_coverage,
-                   lookback_years, min_eps_points, shiller_cape, cape_spread
+            SELECT *
             FROM cc_cape_runs
             ORDER BY run_id DESC
             LIMIT ?
@@ -581,24 +1207,194 @@ def api_cc_cape_runs(request: Request, limit: int = 50):
 
     return {
         "count": len(rows),
-        "runs": [
-            {
-                "run_id": r["run_id"],
-                "run_at": r["run_at"],
-                "cc_cape": r["cc_cape"],
-                "avg_company_cape": r["avg_company_cape"],
-                "symbols_total": r["symbols_total"],
-                "symbols_with_price": r["symbols_with_price"],
-                "symbols_with_valid_cape": r["symbols_with_valid_cape"],
-                "weighting_method": r["weighting_method"],
-                "market_cap_coverage": r["market_cap_coverage"],
-                "lookback_years": r["lookback_years"],
-                "min_eps_points": r["min_eps_points"],
-                "shiller_cape": r["shiller_cape"],
-                "cape_spread": r["cape_spread"],
-            }
-            for r in rows
-        ],
+        "runs": [_serialize_cc_cape_run(r) for r in rows],
+        "viewer_role": user["role"],
+        "generated_at": now_utc(),
+    }
+
+
+@app.get("/api/metrics/cc-cape/series/monthly")
+def api_cc_cape_series_monthly(
+    request: Request,
+    as_of_constituents_date: str | None = None,
+    lookback_years: int = 10,
+    min_eps_points: int = 8,
+    market_cap_min_coverage: float = 0.8,
+    limit: int = 240,
+):
+    if limit < 1 or limit > 5000:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 5000")
+
+    with _open_conn() as conn:
+        user = _require_api_login(request, conn)
+
+    free_conn = _open_free_data_conn()
+    if free_conn is None:
+        raise HTTPException(status_code=404, detail="Free-data DB not found.")
+
+    mcap_permille = int(round(market_cap_min_coverage * 1000))
+
+    with free_conn:
+        if not _table_exists(free_conn, "cc_cape_series_monthly"):
+            raise HTTPException(status_code=404, detail="Monthly series not found. Run backfill script first.")
+
+        if not as_of_constituents_date:
+            row = free_conn.execute(
+                "SELECT MAX(as_of_constituents_date) AS as_of_constituents_date FROM cc_cape_series_monthly"
+            ).fetchone()
+            as_of_constituents_date = row["as_of_constituents_date"] if row else None
+
+        if not as_of_constituents_date:
+            raise HTTPException(status_code=404, detail="Monthly series not found. Run backfill script first.")
+
+        rows = free_conn.execute(
+            """
+            SELECT as_of_constituents_date,
+                   observation_date,
+                   cc_cape,
+                   avg_company_cape,
+                   cc_cape_percentile,
+                   cc_cape_zscore,
+                   shiller_cape,
+                   shiller_cape_date,
+                   cape_spread,
+                   cape_spread_percentile,
+                   cape_spread_zscore,
+                   symbols_total,
+                   symbols_with_price,
+                   symbols_with_valid_cape,
+                   weighting_method,
+                   market_cap_coverage,
+                   lookback_years,
+                   min_eps_points,
+                   market_cap_min_coverage_permille
+            FROM cc_cape_series_monthly
+            WHERE as_of_constituents_date = ?
+              AND lookback_years = ?
+              AND min_eps_points = ?
+              AND market_cap_min_coverage_permille = ?
+            ORDER BY observation_date
+            LIMIT ?
+            """,
+            (as_of_constituents_date, lookback_years, min_eps_points, mcap_permille, limit),
+        ).fetchall()
+
+    return {
+        "as_of_constituents_date": as_of_constituents_date,
+        "lookback_years": lookback_years,
+        "min_eps_points": min_eps_points,
+        "market_cap_min_coverage_permille": mcap_permille,
+        "count": len(rows),
+        "series": [dict(row) for row in rows],
+        "viewer_role": user["role"],
+        "generated_at": now_utc(),
+    }
+
+
+@app.get("/api/metrics/cc-cape/constituents")
+def api_cc_cape_constituents(
+    request: Request,
+    run_id: int | None = None,
+    limit: int = 500,
+    sort: str = "weight",
+):
+    if limit < 1 or limit > 5000:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 5000")
+
+    sort = (sort or "weight").strip().lower()
+    order_by = "m.weight DESC, m.symbol"
+    if sort == "contribution":
+        order_by = "(m.weight * m.company_cape) DESC, m.symbol"
+    elif sort == "cape":
+        order_by = "m.company_cape DESC, m.symbol"
+    elif sort == "symbol":
+        order_by = "m.symbol"
+    elif sort == "weight":
+        order_by = "m.weight DESC, m.symbol"
+    else:
+        raise HTTPException(status_code=400, detail="sort must be one of: weight, contribution, cape, symbol")
+
+    with _open_conn() as conn:
+        user = _require_api_login(request, conn)
+
+    free_conn = _open_free_data_conn()
+    if free_conn is None:
+        raise HTTPException(status_code=404, detail="Free-data DB not found.")
+
+    with free_conn:
+        run = _get_cc_cape_run(free_conn, run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="No matching CC CAPE run found.")
+
+        rows = free_conn.execute(
+            f"""
+            SELECT m.symbol,
+                   c.security,
+                   m.cik,
+                   m.gics_sector,
+                   m.price_date,
+                   m.close_price,
+                   m.shares_outstanding,
+                   m.market_cap,
+                   m.eps_tag,
+                   m.eps_points,
+                   m.avg_real_eps,
+                   m.company_cape,
+                   m.weight,
+                   (m.weight * m.company_cape) AS contribution
+            FROM cc_cape_constituent_metrics m
+            JOIN cc_cape_runs r ON r.run_id = m.run_id
+            LEFT JOIN sp500_constituents c
+              ON c.symbol = m.symbol AND c.as_of_date = r.as_of_constituents_date
+            WHERE m.run_id = ?
+            ORDER BY {order_by}
+            LIMIT ?
+            """,
+            (run["run_id"], limit),
+        ).fetchall()
+
+    return {
+        "run": _serialize_cc_cape_run(run),
+        "count": len(rows),
+        "constituents": [dict(row) for row in rows],
+        "viewer_role": user["role"],
+        "generated_at": now_utc(),
+    }
+
+
+@app.get("/api/metrics/cc-cape/sectors")
+def api_cc_cape_sectors(request: Request, run_id: int | None = None):
+    with _open_conn() as conn:
+        user = _require_api_login(request, conn)
+
+    free_conn = _open_free_data_conn()
+    if free_conn is None:
+        raise HTTPException(status_code=404, detail="Free-data DB not found.")
+
+    with free_conn:
+        run = _get_cc_cape_run(free_conn, run_id)
+        if not run:
+            raise HTTPException(status_code=404, detail="No matching CC CAPE run found.")
+
+        rows = free_conn.execute(
+            """
+            SELECT COALESCE(gics_sector, '(Unknown)') AS sector,
+                   COUNT(*) AS constituents,
+                   SUM(weight) AS weight_sum,
+                   SUM(weight * company_cape) AS contribution,
+                   CASE WHEN SUM(weight) > 0 THEN SUM(weight * company_cape) / SUM(weight) END AS sector_cape
+            FROM cc_cape_constituent_metrics
+            WHERE run_id = ?
+            GROUP BY COALESCE(gics_sector, '(Unknown)')
+            ORDER BY contribution DESC
+            """,
+            (run["run_id"],),
+        ).fetchall()
+
+    return {
+        "run": _serialize_cc_cape_run(run),
+        "count": len(rows),
+        "sectors": [dict(row) for row in rows],
         "viewer_role": user["role"],
         "generated_at": now_utc(),
     }
@@ -850,6 +1646,54 @@ def users_page(request: Request):
             "user": user,
             "users": users,
             "roles": ROLES,
+            "message": request.query_params.get("msg", ""),
+            "error": request.query_params.get("error", ""),
+        },
+    )
+
+
+@app.get("/admin/audit", response_class=HTMLResponse)
+def audit_page(request: Request, username: str | None = None, limit: int = 200):
+    if limit < 1 or limit > 2000:
+        limit = 200
+
+    with _open_conn() as conn:
+        user, redirect = _require_login(request, conn)
+        if redirect:
+            return redirect
+        if user["role"] != "admin":
+            return RedirectResponse("/board?error=Admin%20role%20required", status_code=303)
+
+        if username:
+            logs = conn.execute(
+                """
+                SELECT occurred_at, username, role, method, path, status_code, client_ip, user_agent, duration_ms
+                FROM access_audit_logs
+                WHERE username = ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (username, limit),
+            ).fetchall()
+        else:
+            logs = conn.execute(
+                """
+                SELECT occurred_at, username, role, method, path, status_code, client_ip, user_agent, duration_ms
+                FROM access_audit_logs
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+
+    return templates.TemplateResponse(
+        "audit.html",
+        {
+            "request": request,
+            "user": user,
+            "logs": logs,
+            "username_filter": username,
+            "limit": limit,
             "message": request.query_params.get("msg", ""),
             "error": request.query_params.get("error", ""),
         },

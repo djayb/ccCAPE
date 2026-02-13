@@ -131,6 +131,24 @@ CREATE TABLE IF NOT EXISTS users (
     active INTEGER NOT NULL DEFAULT 1,
     created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS access_audit_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    occurred_at TEXT NOT NULL,
+    username TEXT,
+    role TEXT,
+    method TEXT NOT NULL,
+    path TEXT NOT NULL,
+    status_code INTEGER,
+    client_ip TEXT,
+    user_agent TEXT,
+    duration_ms INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS idx_access_audit_logs_occurred_at
+    ON access_audit_logs(occurred_at);
+CREATE INDEX IF NOT EXISTS idx_access_audit_logs_username
+    ON access_audit_logs(username);
 """
 
 

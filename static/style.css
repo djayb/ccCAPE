@@ -234,6 +234,21 @@ textarea {
   vertical-align: top;
 }
 
+.chart-grid {
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  gap: 1rem;
+  align-items: stretch;
+}
+
+.chart-canvas {
+  display: block;
+  width: 100%;
+  background: #f8fbff;
+  border: 1px solid var(--line);
+  border-radius: 0.65rem;
+}
+
 .login-body {
   min-height: 100vh;
   display: grid;
@@ -264,6 +279,10 @@ textarea {
   }
 
   .board-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .chart-grid {
     grid-template-columns: 1fr;
   }
 }

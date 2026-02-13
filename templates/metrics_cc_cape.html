@@ -4,6 +4,7 @@
   <div>
     <h1>CC CAPE (Free-Data Proxy)</h1>
     <div class="meta-row">Source: Wikipedia + SEC + FRED CPI + Stooq</div>
+    <div class="meta-row"><a href="/metrics/cc-cape/contributors">View contributors and export CSV</a></div>
   </div>
 </section>
 
@@ -16,7 +17,15 @@
     {% else %}
       <p><strong>Run ID:</strong> {{ latest_run.run_id }}</p>
       <p><strong>Run At:</strong> {{ latest_run.run_at }}</p>
+      <p><strong>Constituents As-Of:</strong> {{ latest_run.as_of_constituents_date }}</p>
+      <p><strong>Latest Price Date:</strong> {{ latest_run.latest_price_date }}</p>
       <p><strong>CC CAPE:</strong> {{ "%.4f"|format(latest_run.cc_cape) }}</p>
+      {% if latest_run.get("cc_cape_percentile") is not none %}
+        <p><strong>CC CAPE Percentile:</strong> {{ "%.1f"|format(latest_run.get("cc_cape_percentile")) }}%</p>
+      {% endif %}
+      {% if latest_run.get("cc_cape_zscore") is not none %}
+        <p><strong>CC CAPE Z-Score:</strong> {{ "%.2f"|format(latest_run.get("cc_cape_zscore")) }}</p>
+      {% endif %}
       <p><strong>Avg Company CAPE:</strong> {{ "%.4f"|format(latest_run.avg_company_cape) }}</p>
       <p><strong>Symbols Used:</strong> {{ latest_run.symbols_with_valid_cape }} / {{ latest_run.symbols_total }}</p>
       <p><strong>Symbols With Price:</strong> {{ latest_run.symbols_with_price }} / {{ latest_run.symbols_total }}</p>
@@ -24,10 +33,24 @@
       <p><strong>Market-Cap Coverage:</strong> {{ "%.3f"|format(latest_run.market_cap_coverage) }}</p>
       <p><strong>Lookback:</strong> {{ latest_run.lookback_years }} years</p>
       <p><strong>Min EPS Points:</strong> {{ latest_run.min_eps_points }}</p>
-      {% if latest_run.cape_spread is not none %}
-        <p><strong>CAPE Spread:</strong> {{ "%.4f"|format(latest_run.cape_spread) }}</p>
+      {% if latest_run.get("shiller_cape") is not none %}
+        <p>
+          <strong>Shiller CAPE:</strong> {{ "%.4f"|format(latest_run.get("shiller_cape")) }}
+          {% if latest_run.get("shiller_cape_date") %}
+            <span class="muted">(as of {{ latest_run.get("shiller_cape_date") }})</span>
+          {% endif %}
+        </p>
       {% endif %}
-      <p class="muted">Markdown report: <code>docs/CC_CAPE_FREE_RUN.md</code></p>
+      {% if latest_run.get("cape_spread") is not none %}
+        <p><strong>CAPE Spread (CC - Shiller):</strong> {{ "%.4f"|format(latest_run.get("cape_spread")) }}</p>
+        {% if latest_run.get("cape_spread_percentile") is not none %}
+          <p><strong>Spread Percentile:</strong> {{ "%.1f"|format(latest_run.get("cape_spread_percentile")) }}%</p>
+        {% endif %}
+        {% if latest_run.get("cape_spread_zscore") is not none %}
+          <p><strong>Spread Z-Score:</strong> {{ "%.2f"|format(latest_run.get("cape_spread_zscore")) }}</p>
+        {% endif %}
+      {% endif %}
+      <p class="muted">Markdown report: <a href="/docs/view/CC_CAPE_FREE_RUN.md"><code>docs/CC_CAPE_FREE_RUN.md</code></a></p>
     {% endif %}
   </article>
 
@@ -47,10 +70,40 @@
         <li>SEC ticker map: {{ steps.get("sec_ticker_map", {}).get("status", "-") }}</li>
         <li>Company facts fetched: {{ steps.get("company_facts", {}).get("facts_fetched", "-") }}</li>
         <li>Prices written: {{ steps.get("prices", {}).get("rows_written", "-") }}</li>
+        <li>Shiller CAPE: {{ steps.get("shiller_cape", {}).get("status", "-") }} (through {{ steps.get("shiller_cape", {}).get("max_observation_date", "-") }})</li>
         <li>Priced symbols: {{ steps.get("quality_checks", {}).get("priced_symbol_count", "-") }}</li>
       </ul>
+      {% set qc = steps.get("quality_checks", {}) %}
+      {% if qc.get("warnings") %}
+        <div class="muted" style="margin-top: 0.6rem;">Warnings:</div>
+        <ul>
+          {% for w in qc.get("warnings", []) %}
+            <li>{{ w }}</li>
+          {% endfor %}
+        </ul>
+      {% endif %}
     {% endif %}
   </article>
+</section>
+
+<section class="panel" style="margin-top: 1rem;">
+  <h2>Time Series</h2>
+  <div class="muted">
+    Charts prefer the backfilled monthly series from <code>/api/metrics/cc-cape/series/monthly</code>
+    (<a href="/metrics/cc-cape/export/series_monthly.csv">export CSV</a>), and fall back to recent runs from
+    <code>/api/metrics/cc-cape/runs</code>.
+  </div>
+  <div class="chart-grid" style="margin-top: 0.75rem;">
+    <div>
+      <div class="muted" style="margin-bottom: 0.35rem;">CC CAPE vs Shiller CAPE</div>
+      <canvas id="cccapeChart" class="chart-canvas" height="220"></canvas>
+    </div>
+    <div>
+      <div class="muted" style="margin-bottom: 0.35rem;">CAPE Spread (CC - Shiller)</div>
+      <canvas id="spreadChart" class="chart-canvas" height="220"></canvas>
+    </div>
+  </div>
+  <div id="chartError" class="muted" style="margin-top: 0.5rem;"></div>
 </section>
 
 <section class="panel" style="margin-top: 1rem;">
@@ -64,6 +117,8 @@
           <th>Run</th>
           <th>Run At</th>
           <th>CC CAPE</th>
+          <th>Shiller</th>
+          <th>Spread</th>
           <th>Symbols Used</th>
           <th>Symbols With Price</th>
           <th>Weighting</th>
@@ -78,6 +133,8 @@
           <td>{{ r.run_id }}</td>
           <td>{{ r.run_at }}</td>
           <td>{{ "%.4f"|format(r.cc_cape) }}</td>
+          <td>{% if r.get("shiller_cape") is not none %}{{ "%.4f"|format(r.get("shiller_cape")) }}{% else %}-{% endif %}</td>
+          <td>{% if r.get("cape_spread") is not none %}{{ "%.4f"|format(r.get("cape_spread")) }}{% else %}-{% endif %}</td>
           <td>{{ r.symbols_with_valid_cape }} / {{ r.symbols_total }}</td>
           <td>{{ r.symbols_with_price }} / {{ r.symbols_total }}</td>
           <td><code>{{ r.weighting_method }}</code></td>
@@ -90,4 +147,192 @@
     </table>
   {% endif %}
 </section>
+
+<script>
+(function () {
+  function toNumber(x) {
+    if (x === null || x === undefined) return null;
+    const n = Number(x);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function resizeCanvasToCssPixels(canvas) {
+    const dpr = window.devicePixelRatio || 1;
+    const cssW = Math.max(1, canvas.clientWidth);
+    const cssH = Math.max(1, canvas.getAttribute("height") ? Number(canvas.getAttribute("height")) : canvas.clientHeight);
+    const needW = Math.floor(cssW * dpr);
+    const needH = Math.floor(cssH * dpr);
+    if (canvas.width !== needW || canvas.height !== needH) {
+      canvas.width = needW;
+      canvas.height = needH;
+    }
+    const ctx = canvas.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    return { ctx, cssW, cssH };
+  }
+
+  function drawLineChart(canvas, labels, seriesList, opts) {
+    const { ctx, cssW, cssH } = resizeCanvasToCssPixels(canvas);
+    ctx.clearRect(0, 0, cssW, cssH);
+
+    const pad = { l: 46, r: 14, t: 14, b: 28 };
+    const plotW = cssW - pad.l - pad.r;
+    const plotH = cssH - pad.t - pad.b;
+    if (plotW <= 10 || plotH <= 10 || labels.length < 2) return;
+
+    const values = [];
+    for (const s of seriesList) {
+      for (const v of s.data) {
+        if (v !== null) values.push(v);
+      }
+    }
+    if (values.length === 0) return;
+
+    let minV = Math.min(...values);
+    let maxV = Math.max(...values);
+    if (minV === maxV) {
+      minV -= 1;
+      maxV += 1;
+    }
+    const range = maxV - minV;
+    const yMin = minV - range * 0.05;
+    const yMax = maxV + range * 0.05;
+
+    function xFor(i) {
+      return pad.l + (i / (labels.length - 1)) * plotW;
+    }
+    function yFor(v) {
+      const t = (v - yMin) / (yMax - yMin);
+      return pad.t + (1 - t) * plotH;
+    }
+
+    // Grid
+    ctx.strokeStyle = "#e6edf8";
+    ctx.lineWidth = 1;
+    for (let g = 0; g <= 4; g++) {
+      const y = pad.t + (g / 4) * plotH;
+      ctx.beginPath();
+      ctx.moveTo(pad.l, y);
+      ctx.lineTo(pad.l + plotW, y);
+      ctx.stroke();
+    }
+
+    // Axes labels (min/max)
+    ctx.fillStyle = "#5c6a82";
+    ctx.font = "12px IBM Plex Sans, Segoe UI, sans-serif";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "top";
+    ctx.fillText(yMax.toFixed(opts && opts.yDecimals !== undefined ? opts.yDecimals : 2), 8, pad.t);
+    ctx.textBaseline = "bottom";
+    ctx.fillText(yMin.toFixed(opts && opts.yDecimals !== undefined ? opts.yDecimals : 2), 8, pad.t + plotH);
+
+    // Lines
+    for (const s of seriesList) {
+      ctx.strokeStyle = s.color;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      let started = false;
+      for (let i = 0; i < labels.length; i++) {
+        const v = s.data[i];
+        if (v === null) {
+          started = false;
+          continue;
+        }
+        const x = xFor(i);
+        const y = yFor(v);
+        if (!started) {
+          ctx.moveTo(x, y);
+          started = true;
+        } else {
+          ctx.lineTo(x, y);
+        }
+      }
+      ctx.stroke();
+    }
+
+    // X labels (first/last)
+    ctx.fillStyle = "#5c6a82";
+    ctx.font = "12px IBM Plex Sans, Segoe UI, sans-serif";
+    ctx.textBaseline = "top";
+    ctx.textAlign = "left";
+    ctx.fillText(labels[0], pad.l, pad.t + plotH + 8);
+    ctx.textAlign = "right";
+    ctx.fillText(labels[labels.length - 1], pad.l + plotW, pad.t + plotH + 8);
+  }
+
+  async function loadAndRender() {
+    const errorEl = document.getElementById("chartError");
+    try {
+      // 1) Prefer monthly backfilled series if present.
+      try {
+        const seriesResp = await fetch("/api/metrics/cc-cape/series/monthly?limit=240", {
+          headers: { Accept: "application/json" },
+        });
+        if (seriesResp.ok) {
+          const payload = await seriesResp.json();
+          const series = (payload && payload.series) ? payload.series : [];
+          if (series.length >= 2) {
+            const labels = series.map((p) => String(p.observation_date || "").slice(0, 10));
+            const cc = series.map((p) => toNumber(p.cc_cape));
+            const shiller = series.map((p) => toNumber(p.shiller_cape));
+            const spread = series.map((p) => toNumber(p.cape_spread));
+
+            drawLineChart(document.getElementById("cccapeChart"), labels, [
+              { name: "CC CAPE", data: cc, color: "#0b6bcb" },
+              { name: "Shiller", data: shiller, color: "#067647" },
+            ], { yDecimals: 1 });
+
+            drawLineChart(document.getElementById("spreadChart"), labels, [
+              { name: "Spread", data: spread, color: "#b42318" },
+            ], { yDecimals: 1 });
+
+            errorEl.textContent = "";
+            return;
+          }
+        }
+      } catch (_ignored) {
+        // fall back to run history
+      }
+
+      // 2) Fall back to run history.
+      const runsResp = await fetch("/api/metrics/cc-cape/runs?limit=120", {
+        headers: { Accept: "application/json" },
+      });
+      if (!runsResp.ok) {
+        throw new Error("Failed to load series (" + runsResp.status + ")");
+      }
+      const payload = await runsResp.json();
+      const runs = (payload && payload.runs) ? payload.runs : [];
+      const sorted = runs
+        .slice()
+        .sort((a, b) => String(a.latest_price_date || a.run_at || "").localeCompare(String(b.latest_price_date || b.run_at || "")));
+
+      const labels = sorted.map((r) => String(r.latest_price_date || r.run_at || "").slice(0, 10));
+      const cc = sorted.map((r) => toNumber(r.cc_cape));
+      const shiller = sorted.map((r) => toNumber(r.shiller_cape));
+      const spread = sorted.map((r) => toNumber(r.cape_spread));
+
+      drawLineChart(document.getElementById("cccapeChart"), labels, [
+        { name: "CC CAPE", data: cc, color: "#0b6bcb" },
+        { name: "Shiller", data: shiller, color: "#067647" },
+      ], { yDecimals: 1 });
+
+      drawLineChart(document.getElementById("spreadChart"), labels, [
+        { name: "Spread", data: spread, color: "#b42318" },
+      ], { yDecimals: 1 });
+
+      errorEl.textContent = "";
+    } catch (err) {
+      errorEl.textContent = "Chart error: " + (err && err.message ? err.message : String(err));
+    }
+  }
+
+  loadAndRender();
+  window.addEventListener("resize", function () {
+    // Cheap debounce.
+    clearTimeout(window.__cccapeResizeTimer);
+    window.__cccapeResizeTimer = setTimeout(loadAndRender, 150);
+  });
+})();
+</script>
 {% endblock %}

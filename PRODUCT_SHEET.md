@@ -24,7 +24,7 @@ The product should answer:
 Goals:
 
 - Produce a reliable CC CAPE time series with transparent methodology.
-- Track CAPE Spread (CC CAPE minus Shiller CAPE) with daily refresh.
+- Track CAPE Spread (CC CAPE minus Shiller CAPE) with weekly refresh in free-data mode (daily is a future enhancement with stronger data feeds).
 - Provide decomposition by company and sector contributions.
 - Expose data through dashboard + API.
 
@@ -52,8 +52,8 @@ Jobs-to-be-done:
 MVP includes:
 
 - Single index support: S&P 500.
-- Daily CC CAPE and CAPE Spread updates.
-- 10-year history backfill at launch.
+- Weekly CC CAPE and CAPE Spread updates (configurable cadence).
+- 10-year history backfill (monthly series for current constituents).
 - Dashboard with:
   - Latest values and percentile bands.
   - History chart (CC CAPE, Shiller CAPE, Spread).
@@ -78,8 +78,8 @@ Aggregate metrics:
 
 Methodology policy:
 
-- Use quarterly earnings inputs for denominator construction.
-- Use daily prices/market caps for numerator and weighting.
+- Use annual-ish EPS points (10-K / FY) from SEC XBRL company facts in free-data mode.
+- Use daily prices for numerator; use a market-cap proxy (price * shares) when available.
 - Freeze methodology versions (v1, v2, etc.) and store lineage metadata.
 
 ## 7. Data Requirements
@@ -91,7 +91,8 @@ Required data domains:
 - Market data:
   - Daily close price, shares outstanding, market cap.
 - Fundamentals:
-  - Quarterly earnings (prefer consistent field definition across vendors).
+  - Free-data mode: annual EPS from SEC XBRL company facts (10-K / FY).
+  - Scale-up mode (future): vendor fundamentals (quarterly/TTM earnings, standardized definitions, restatement flags).
 - Inflation:
   - CPI series for real earnings conversion.
 - Benchmark:
@@ -108,11 +109,11 @@ Data quality checks:
 
 FR-001 Data ingestion:
 
-- Scheduled ETL pulls constituents, prices, fundamentals, CPI, benchmark CAPE.
+- Scheduled ETL pulls constituents, prices, fundamentals, CPI, benchmark CAPE (weekly by default in free-data mode).
 
 FR-002 Calculation engine:
 
-- Compute company-level CAPE and index-level CC CAPE daily.
+- Compute company-level CAPE and index-level CC CAPE on schedule (weekly by default in free-data mode).
 
 FR-003 Spread analytics:
 
@@ -137,25 +138,32 @@ FR-007 Auditability:
 ## 9. Non-Functional Requirements
 
 - Accuracy: reproduce a fixed historical sample within agreed tolerance.
-- Reliability: >99% successful daily pipeline runs.
-- Latency: daily update complete within 30 minutes of market close data availability.
+- Reliability: scheduled runs complete successfully and publish updated metrics weekly in free-data mode; failures are surfaced with actionable status/warnings.
+- Latency: weekly update completes within 60 minutes of scheduled start (typical runs should be much faster).
 - Security: role-based access for admin functions.
 - Observability: run logs, metrics, and alerting for data and compute failures.
 
 ## 10. Proposed Technical Architecture
 
+Current MVP implementation (free-data mode):
+
+- Orchestration: weekly scheduler (Docker service).
+- Data processing: Python scripts.
+- Storage: SQLite (`internal_jira.db`, `free_data.db`).
+- API + UI: FastAPI + Jinja templates.
+- Ops: health page + KPI baseline markdown report + tracker comments.
+
+Scale-up path (future):
+
 - Orchestration: cron/Airflow.
-- Data processing: Python + SQL.
-- Storage: Postgres (or warehouse).
-- API: FastAPI.
-- Dashboard: lightweight web app (React or Streamlit for MVP).
+- Storage: Postgres/warehouse.
 - Monitoring: job health checks + alert hooks.
 
 ## 11. Success Metrics
 
 Product KPIs:
 
-- Daily freshness SLA met.
+- Weekly freshness SLA met (free-data mode).
 - Data completeness rate.
 - API/dashboard adoption (weekly active users).
 - Time to publish valuation commentary reduced.
@@ -183,5 +191,5 @@ Mitigation: robust entity mapping and reconciliation checks.
 
 - Exact earnings field for denominator (reported vs operating).
 - Treatment of negative earnings cases.
-- Frequency of public release (daily internal vs weekly external).
+- Refresh cadence for the intended users (weekly vs daily) given data source constraints.
 - First target deployment: internal-only or client-facing.

@@ -18,11 +18,15 @@ Build CC CAPE without paid market data subscriptions, understanding accuracy and
 2. Inflation for real earnings conversion (free, official)
 - FRED CPI series (`CPIAUCSL`) + FRED API key.
 
-3. Current constituent list (free, unofficial)
+3. Shiller CAPE benchmark (free, unofficial)
+- Multpl publishes a public Shiller PE (CAPE) history table that can be scraped for research/prototyping.
+- For academic source-of-truth, Robert Shiller publishes data via Yale (often as XLS), which requires parsing and careful field mapping.
+
+4. Current constituent list (free, unofficial)
 - Wikipedia S&P 500 component table is commonly used for prototypes.
 - For official production-grade membership/weights, S&P constituent data is generally licensed.
 
-4. Price data options without paid contract
+5. Price data options without paid contract
 - SimFin free tier (API + bulk download), but free tier has shorter history and non-commercial constraints.
 - Alpha Vantage free tier works for prototyping but request limits are low for full S&P 500 daily processing.
 - Nasdaq Data Link has free and premium feeds; free feed coverage/quality differs by dataset.

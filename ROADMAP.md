@@ -45,7 +45,7 @@ Deliverables:
 
 Exit criteria:
 
-- 30-day dry run with >=99% successful pipeline runs.
+- 4-week dry run with >=99% successful scheduled pipeline runs (weekly cadence in free-data mode).
 - Missing/stale data checks functioning with actionable alerts.
 
 ## Phase 2 (Weeks 6-8): Calculation Engine
@@ -172,7 +172,7 @@ Action: establish runbook, alert routing, and on-call owner in Phase 4.
 
 ## 6. Acceptance Checklist for MVP
 
-- Daily CC CAPE and Spread generated automatically.
+- Weekly CC CAPE and Spread generated automatically (configurable cadence).
 - Historical charting available with export.
 - Methodology and lineage visible for every published value.
 - Reliability and freshness KPIs tracked and reported weekly.

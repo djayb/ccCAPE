@@ -6,6 +6,14 @@ This repository includes:
 
 - Product sheet: `PRODUCT_SHEET.md`
 - Delivery roadmap: `ROADMAP.md`
+- Runbook: `docs/RUNBOOK.md`
+- Architecture: `docs/ARCHITECTURE.md`
+- Data model: `docs/DATA_MODEL.md`
+- Methodology: `docs/METHODOLOGY.md`
+- Data sources: `docs/DATA_SOURCES.md`
+- Onboarding: `docs/ONBOARDING.md`
+- Release checklist: `docs/RELEASE_CHECKLIST.md`
+- Pilot plan: `docs/PILOT_PLAN.md`
 - Internal Jira-like tracker CLI: `internal_jira.py`
 - Internal web tracker UI with auth/roles: `web_app.py`
 
@@ -45,6 +53,10 @@ uvicorn web_app:app --reload --host 0.0.0.0 --port 8000
 Open:
 
 - [http://127.0.0.1:8000](http://127.0.0.1:8000)
+- [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
+- [http://127.0.0.1:8000/metrics/cc-cape](http://127.0.0.1:8000/metrics/cc-cape)
+- [http://127.0.0.1:8000/metrics/health](http://127.0.0.1:8000/metrics/health)
+- [http://127.0.0.1:8000/metrics/cc-cape/contributors](http://127.0.0.1:8000/metrics/cc-cape/contributors)
 
 ## 4. Run With Docker
 
@@ -95,6 +107,11 @@ Available endpoints:
 - `GET /api/board?project=CAPE`
 - `GET /api/issues?project=CAPE&status=in_progress`
 - `GET /api/issues/{issue_key}`
+- `GET /api/metrics/cc-cape/latest`
+- `GET /api/metrics/cc-cape/runs?limit=N`
+- `GET /api/metrics/cc-cape/series/monthly?limit=N`
+- `GET /api/metrics/cc-cape/constituents?run_id=ID&limit=N&sort=weight|contribution|cape|symbol`
+- `GET /api/metrics/cc-cape/sectors?run_id=ID`
 
 ## 6. CLI Usage (Core)
 
@@ -152,6 +169,7 @@ What it ingests:
 - Wikipedia S&P 500 constituents (including CIKs)
 - SEC company facts by CIK
 - FRED CPI CSV (`CPIAUCSL`)
+- Shiller CAPE history (Multpl Shiller PE table)
 - Stooq daily price history
 
 Outputs:
@@ -192,6 +210,9 @@ Outputs:
 
 Optional benchmark spread:
 
+By default, the calculator uses the latest ingested Shiller CAPE on/before the latest price date.
+You can override with an explicit value:
+
 ```bash
 python3 scripts/calc_cc_cape_free.py --shiller-cape 31.5
 ```
@@ -202,6 +223,7 @@ The compose stack now includes `cccape-weekly`, which runs:
 
 1. `scripts/free_data_pipeline.py`
 2. `scripts/calc_cc_cape_free.py`
+3. `scripts/backfill_cc_cape_series_free.py` (monthly series refresh)
 
 Default schedule:
 
@@ -216,9 +238,42 @@ Key scheduler settings in `docker-compose.yml`:
 - `WEEKLY_PRICES_SYMBOL_LIMIT`
 - `WEEKLY_MIN_EPS_POINTS`
 - `WEEKLY_UPDATE_TRACKER`
+- `WEEKLY_SERIES_ENABLED`
+- `WEEKLY_SERIES_YEARS`
 
 Restart scheduler after changing schedule/env:
 
 ```bash
 docker compose up --build -d
 ```
+
+## 12. Monthly Series Backfill (Free-Data Proxy)
+
+Backfill a monthly CC CAPE series for "current constituents" (fixed to the latest constituents snapshot):
+
+```bash
+python3 scripts/backfill_cc_cape_series_free.py \
+  --series-years 10 \
+  --lookback-years 10 \
+  --min-eps-points 8 \
+  --update-tracker
+```
+
+This writes into `data/free_data.db`:
+
+- `cc_cape_series_monthly`
+
+And enables:
+
+- `GET /api/metrics/cc-cape/series/monthly`
+- CSV export: `GET /metrics/cc-cape/export/series_monthly.csv`
+
+## 13. KPI Baseline Report
+
+Generate a lightweight ops/adoption baseline report:
+
+```bash
+python3 scripts/generate_kpi_report.py --out docs/KPI_BASELINE.md --update-tracker
+```
+
+This is also run by the weekly scheduler by default (`WEEKLY_KPI_ENABLED=true`).

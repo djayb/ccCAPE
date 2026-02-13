@@ -41,6 +41,9 @@ services:
       WEEKLY_LOOKBACK_YEARS: "10"
       WEEKLY_MARKET_CAP_MIN_COVERAGE: "0.8"
       WEEKLY_CALC_MARKDOWN_PATH: /app/docs/CC_CAPE_FREE_RUN.md
+      WEEKLY_SERIES_ENABLED: "true"
+      WEEKLY_SERIES_YEARS: "10"
+      WEEKLY_SERIES_MAX_SYMBOLS: "0"
     volumes:
       - ./data:/app/data
       - ./docs:/app/docs

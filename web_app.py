@@ -1291,6 +1291,53 @@ def api_cc_cape_series_monthly(
     }
 
 
+@app.get("/api/metrics/shiller-cape/series/monthly")
+def api_shiller_cape_series_monthly(request: Request, years: int = 50, limit: int | None = None):
+    if years < 1 or years > 200:
+        raise HTTPException(status_code=400, detail="years must be between 1 and 200")
+
+    if limit is None:
+        # Keep a bit of headroom for partial months and source quirks.
+        limit = years * 12 + 24
+
+    if limit < 1 or limit > 5000:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 5000")
+
+    with _open_conn() as conn:
+        user = _require_api_login(request, conn)
+
+    free_conn = _open_free_data_conn()
+    if free_conn is None:
+        raise HTTPException(status_code=404, detail="Free-data DB not found.")
+
+    with free_conn:
+        if not _table_exists(free_conn, "shiller_cape_observations"):
+            raise HTTPException(status_code=404, detail="Shiller CAPE series not found. Run free-data pipeline first.")
+
+        rows = free_conn.execute(
+            """
+            SELECT observation_date, shiller_cape
+            FROM (
+                SELECT observation_date, shiller_cape
+                FROM shiller_cape_observations
+                ORDER BY observation_date DESC
+                LIMIT ?
+            )
+            ORDER BY observation_date
+            """,
+            (limit,),
+        ).fetchall()
+
+    return {
+        "years": years,
+        "limit": limit,
+        "count": len(rows),
+        "series": [dict(row) for row in rows],
+        "viewer_role": user["role"],
+        "generated_at": now_utc(),
+    }
+
+
 @app.get("/api/metrics/cc-cape/constituents")
 def api_cc_cape_constituents(
     request: Request,

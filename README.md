@@ -6,6 +6,7 @@ This repository includes:
 
 - Product sheet: `PRODUCT_SHEET.md`
 - Delivery roadmap: `ROADMAP.md`
+- Runbook: `docs/RUNBOOK.md`
 - Internal Jira-like tracker CLI: `internal_jira.py`
 - Internal web tracker UI with auth/roles: `web_app.py`
 

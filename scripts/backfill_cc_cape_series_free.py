@@ -76,6 +76,10 @@ SHARES_TAG_PRIORITY = {
     "WeightedAverageNumberOfSharesOutstandingBasic": 3,
 }
 
+# SEC company facts often include multiple contexts per end_date (quarter, YTD, annual).
+# For CAPE we want annual-ish values; filter by period length using start/end dates.
+ANNUAL_PERIOD_DAYS_MIN = 330
+
 
 def ensure_parent_dir(path: str) -> None:
     Path(path).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
@@ -238,6 +242,19 @@ def _dedup_latest_by_end_date(rows: list[sqlite3.Row]) -> dict[str, sqlite3.Row]
         if current is None:
             dedup[end_date] = row
             continue
+        try:
+            current_days = int(current["period_days"] or 0)
+        except (KeyError, IndexError, TypeError, ValueError):
+            current_days = 0
+        try:
+            candidate_days = int(row["period_days"] or 0)
+        except (KeyError, IndexError, TypeError, ValueError):
+            candidate_days = 0
+        if candidate_days > current_days:
+            dedup[end_date] = row
+            continue
+        if candidate_days < current_days:
+            continue
         current_filed = current["filed_date"] or ""
         candidate_filed = row["filed_date"] or ""
         if candidate_filed >= current_filed:
@@ -252,17 +269,26 @@ def load_eps_candidates(conn: sqlite3.Connection, cik: str) -> list[tuple[str, l
 
     rows = conn.execute(
         """
-        SELECT tag, end_date, filed_date, value, form, fiscal_period, unit
+        SELECT tag,
+               start_date,
+               end_date,
+               filed_date,
+               value,
+               form,
+               fiscal_period,
+               unit,
+               CAST(julianday(end_date) - julianday(start_date) AS INT) AS period_days
         FROM company_facts_values
         WHERE cik = ?
           AND tag IN ('EarningsPerShareBasic', 'EarningsPerShareDiluted')
           AND value IS NOT NULL
           AND end_date IS NOT NULL
+          AND start_date IS NOT NULL
           AND (unit LIKE 'USD%' OR unit LIKE 'usd%')
-          AND (form LIKE '10-K%' OR fiscal_period = 'FY')
+          AND CAST(julianday(end_date) - julianday(start_date) AS INT) >= ?
         ORDER BY end_date, filed_date
         """,
-        (cik,),
+        (cik, ANNUAL_PERIOD_DAYS_MIN),
     ).fetchall()
     if rows:
         dedup: dict[tuple[str, str], sqlite3.Row] = {}
@@ -271,6 +297,19 @@ def load_eps_candidates(conn: sqlite3.Connection, cik: str) -> list[tuple[str, l
             current = dedup.get(key)
             if current is None:
                 dedup[key] = row
+                continue
+            try:
+                current_days = int(current["period_days"] or 0)
+            except (TypeError, ValueError):
+                current_days = 0
+            try:
+                candidate_days = int(row["period_days"] or 0)
+            except (TypeError, ValueError):
+                candidate_days = 0
+            if candidate_days > current_days:
+                dedup[key] = row
+                continue
+            if candidate_days < current_days:
                 continue
             current_filed = current["filed_date"] or ""
             candidate_filed = row["filed_date"] or ""
@@ -301,31 +340,47 @@ def load_eps_candidates(conn: sqlite3.Connection, cik: str) -> list[tuple[str, l
     # Fallback: computed EPS = NetIncomeLoss / WeightedAvgSharesBasic (annual 10-K / FY).
     net_income_rows = conn.execute(
         """
-        SELECT end_date, filed_date, value, form, fiscal_period, unit
+        SELECT start_date,
+               end_date,
+               filed_date,
+               value,
+               form,
+               fiscal_period,
+               unit,
+               CAST(julianday(end_date) - julianday(start_date) AS INT) AS period_days
         FROM company_facts_values
         WHERE cik = ?
           AND tag = 'NetIncomeLoss'
           AND value IS NOT NULL
           AND end_date IS NOT NULL
+          AND start_date IS NOT NULL
           AND (unit LIKE 'USD%' OR unit LIKE 'usd%')
-          AND (form LIKE '10-K%' OR fiscal_period = 'FY')
+          AND CAST(julianday(end_date) - julianday(start_date) AS INT) >= ?
         ORDER BY end_date, filed_date
         """,
-        (cik,),
+        (cik, ANNUAL_PERIOD_DAYS_MIN),
     ).fetchall()
     shares_rows = conn.execute(
         """
-        SELECT end_date, filed_date, value, form, fiscal_period, unit
+        SELECT start_date,
+               end_date,
+               filed_date,
+               value,
+               form,
+               fiscal_period,
+               unit,
+               CAST(julianday(end_date) - julianday(start_date) AS INT) AS period_days
         FROM company_facts_values
         WHERE cik = ?
           AND tag = 'WeightedAverageNumberOfSharesOutstandingBasic'
           AND value IS NOT NULL
           AND value > 0
           AND end_date IS NOT NULL
-          AND (form LIKE '10-K%' OR fiscal_period = 'FY')
+          AND start_date IS NOT NULL
+          AND CAST(julianday(end_date) - julianday(start_date) AS INT) >= ?
         ORDER BY end_date, filed_date
         """,
-        (cik,),
+        (cik, ANNUAL_PERIOD_DAYS_MIN),
     ).fetchall()
     if net_income_rows and shares_rows:
         net_by_end = _dedup_latest_by_end_date(net_income_rows)
@@ -587,6 +642,21 @@ def compute_and_store_series(args: argparse.Namespace) -> dict[str, Any]:
         market_cap_min_coverage_permille = int(round(args.market_cap_min_coverage * 1000))
         market_cap_min_coverage = market_cap_min_coverage_permille / 1000.0
 
+        deleted_existing = 0
+        if args.replace_existing:
+            cursor = conn.execute(
+                """
+                DELETE FROM cc_cape_series_monthly
+                WHERE as_of_constituents_date = ?
+                  AND lookback_years = ?
+                  AND min_eps_points = ?
+                  AND market_cap_min_coverage_permille = ?
+                """,
+                (as_of_date, args.lookback_years, args.min_eps_points, market_cap_min_coverage_permille),
+            )
+            deleted_existing = int(cursor.rowcount or 0) if cursor.rowcount and cursor.rowcount > 0 else 0
+            conn.commit()
+
         # Preload EPS and shares series for all CIKs we can resolve.
         eps_cache: dict[str, list[tuple[str, list[tuple[dt.date, float]]]]] = {}
         shares_cache: dict[str, tuple[list[dt.date], list[float]]] = {}
@@ -717,6 +787,8 @@ def compute_and_store_series(args: argparse.Namespace) -> dict[str, Any]:
             cape_spread = (cc_cape - shiller_cape) if shiller_cape is not None else None
 
             notes = {
+                "methodology_version": "free-v2-annual-period-filter",
+                "eps_period_days_min": ANNUAL_PERIOD_DAYS_MIN,
                 "asof_price_policy": "last_trading_day_on_or_before_observation_date",
                 "observation_date": obs_date.isoformat(),
                 "max_price_date_used": max_price_used.isoformat() if max_price_used else None,
@@ -821,6 +893,7 @@ def compute_and_store_series(args: argparse.Namespace) -> dict[str, Any]:
         "lookback_years": args.lookback_years,
         "min_eps_points": args.min_eps_points,
         "market_cap_min_coverage": market_cap_min_coverage,
+        "deleted_existing_rows": deleted_existing,
         "observations_requested": observations,
         "observations_stored": stored,
         "symbols_total": len(constituents),
@@ -917,6 +990,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=float,
         default=0.8,
         help="Minimum market-cap coverage to use market-cap weighting; otherwise equal-weight fallback.",
+    )
+    parser.add_argument(
+        "--replace-existing",
+        action="store_true",
+        default=False,
+        help="Delete existing series rows for this parameter set before recomputing.",
     )
     parser.add_argument("--max-symbols", type=int, default=0, help="Optional cap on symbols processed (0 = all).")
     parser.add_argument(

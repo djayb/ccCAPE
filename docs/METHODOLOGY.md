@@ -31,8 +31,11 @@ Stored in: `daily_prices`.
   - `EarningsPerShareBasic`
   - `EarningsPerShareDiluted`
 - Annual-ish filtering:
-  - prefers rows with `form` like `10-K` or `fiscal_period = 'FY'`
-  - dedupes by `(tag, end_date)` and keeps the latest `filed_date` (restatement proxy)
+  - SEC company facts often include multiple contexts for the same `end_date` (quarter, YTD, annual)
+  - filter to "annual-ish" periods by requiring `start_date` and `end_date` span at least ~11 months (`period_days >= 330`)
+  - dedupe by `(tag, end_date)` and keep the row with the **longest period** (then latest `filed_date` as a restatement proxy)
+  - if reported EPS is missing, a computed fallback is used:
+    - `NetIncomeLoss / WeightedAverageNumberOfSharesOutstandingBasic` (annual-ish periods only)
 
 ## 5) Inflation Adjustment (Real EPS)
 
@@ -109,4 +112,3 @@ These are **internal relative** measures and depend on how much history you’ve
 - Ingestion: `scripts/free_data_pipeline.py`
 - Latest calculation: `scripts/calc_cc_cape_free.py`
 - Monthly backfill: `scripts/backfill_cc_cape_series_free.py`
-

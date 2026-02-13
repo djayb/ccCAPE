@@ -6,6 +6,7 @@ services:
       - "8000:8000"
     environment:
       TRACKER_DB: /app/data/internal_jira.db
+      FREE_DATA_DB: /app/data/free_data.db
       TRACKER_SESSION_SECRET: change-this-session-secret
       TRACKER_ADMIN_USER: admin
       TRACKER_ADMIN_PASSWORD: admin123

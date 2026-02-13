@@ -1,0 +1,93 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="issue-header">
+  <div>
+    <h1>CC CAPE (Free-Data Proxy)</h1>
+    <div class="meta-row">Source: Wikipedia + SEC + FRED CPI + Stooq</div>
+  </div>
+</section>
+
+<section class="issue-layout">
+  <article class="panel">
+    <h2>Latest CC CAPE Run</h2>
+    {% if not latest_run %}
+      <p class="muted">No CC CAPE runs found yet.</p>
+      <p class="muted">Run: <code>python3 scripts/calc_cc_cape_free.py --update-tracker</code></p>
+    {% else %}
+      <p><strong>Run ID:</strong> {{ latest_run.run_id }}</p>
+      <p><strong>Run At:</strong> {{ latest_run.run_at }}</p>
+      <p><strong>CC CAPE:</strong> {{ "%.4f"|format(latest_run.cc_cape) }}</p>
+      <p><strong>Avg Company CAPE:</strong> {{ "%.4f"|format(latest_run.avg_company_cape) }}</p>
+      <p><strong>Symbols Used:</strong> {{ latest_run.symbols_with_valid_cape }} / {{ latest_run.symbols_total }}</p>
+      <p><strong>Symbols With Price:</strong> {{ latest_run.symbols_with_price }} / {{ latest_run.symbols_total }}</p>
+      <p><strong>Weighting:</strong> <code>{{ latest_run.weighting_method }}</code></p>
+      <p><strong>Market-Cap Coverage:</strong> {{ "%.3f"|format(latest_run.market_cap_coverage) }}</p>
+      <p><strong>Lookback:</strong> {{ latest_run.lookback_years }} years</p>
+      <p><strong>Min EPS Points:</strong> {{ latest_run.min_eps_points }}</p>
+      {% if latest_run.cape_spread is not none %}
+        <p><strong>CAPE Spread:</strong> {{ "%.4f"|format(latest_run.cape_spread) }}</p>
+      {% endif %}
+      <p class="muted">Markdown report: <code>docs/CC_CAPE_FREE_RUN.md</code></p>
+    {% endif %}
+  </article>
+
+  <article class="panel">
+    <h2>Latest Ingestion Run</h2>
+    {% if not latest_ingestion %}
+      <p class="muted">No ingestion runs found yet.</p>
+      <p class="muted">Run: <code>python3 scripts/free_data_pipeline.py --update-tracker</code></p>
+    {% else %}
+      <p><strong>Status:</strong> {{ latest_ingestion.status }}</p>
+      <p><strong>Started:</strong> {{ latest_ingestion.run_started_at }}</p>
+      <p><strong>Completed:</strong> {{ latest_ingestion.run_completed_at }}</p>
+      {% set steps = latest_ingestion.details.get("steps", {}) %}
+      <div class="muted">Step summary:</div>
+      <ul>
+        <li>Constituents: {{ steps.get("constituents", {}).get("records", "-") }}</li>
+        <li>SEC ticker map: {{ steps.get("sec_ticker_map", {}).get("status", "-") }}</li>
+        <li>Company facts fetched: {{ steps.get("company_facts", {}).get("facts_fetched", "-") }}</li>
+        <li>Prices written: {{ steps.get("prices", {}).get("rows_written", "-") }}</li>
+        <li>Priced symbols: {{ steps.get("quality_checks", {}).get("priced_symbol_count", "-") }}</li>
+      </ul>
+    {% endif %}
+  </article>
+</section>
+
+<section class="panel" style="margin-top: 1rem;">
+  <h2>Recent CC CAPE Runs</h2>
+  {% if runs|length == 0 %}
+    <p class="muted">none</p>
+  {% else %}
+    <table class="table">
+      <thead>
+        <tr>
+          <th>Run</th>
+          <th>Run At</th>
+          <th>CC CAPE</th>
+          <th>Symbols Used</th>
+          <th>Symbols With Price</th>
+          <th>Weighting</th>
+          <th>Coverage</th>
+          <th>Lookback</th>
+          <th>Min EPS</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for r in runs %}
+        <tr>
+          <td>{{ r.run_id }}</td>
+          <td>{{ r.run_at }}</td>
+          <td>{{ "%.4f"|format(r.cc_cape) }}</td>
+          <td>{{ r.symbols_with_valid_cape }} / {{ r.symbols_total }}</td>
+          <td>{{ r.symbols_with_price }} / {{ r.symbols_total }}</td>
+          <td><code>{{ r.weighting_method }}</code></td>
+          <td>{{ "%.3f"|format(r.market_cap_coverage) }}</td>
+          <td>{{ r.lookback_years }}</td>
+          <td>{{ r.min_eps_points }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% endif %}
+</section>
+{% endblock %}

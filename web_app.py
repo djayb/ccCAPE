@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+import sqlite3
+import json
 
 from fastapi import FastAPI, Request, Form, HTTPException
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -32,6 +34,7 @@ from internal_jira import (
 )
 
 DB_PATH = os.environ.get("TRACKER_DB", "data/internal_jira.db")
+FREE_DATA_DB_PATH = os.environ.get("FREE_DATA_DB", "data/free_data.db")
 SESSION_SECRET = os.environ.get("TRACKER_SESSION_SECRET", "replace-this-secret")
 BASE_DIR = Path(__file__).resolve().parent
 
@@ -45,6 +48,17 @@ def _open_conn():
     conn = connect(DB_PATH)
     init_db(conn)
     ensure_default_admin(conn)
+    return conn
+
+
+def _open_free_data_conn() -> sqlite3.Connection | None:
+    path = Path(FREE_DATA_DB_PATH)
+    if not path.exists():
+        return None
+    # Read-only by default to avoid accidental writes from the web app.
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout = 2000;")
     return conn
 
 
@@ -90,6 +104,92 @@ def startup() -> None:
 @app.get("/", response_class=HTMLResponse)
 def root() -> RedirectResponse:
     return RedirectResponse("/board", status_code=303)
+
+
+@app.get("/metrics", response_class=HTMLResponse)
+def metrics_redirect() -> RedirectResponse:
+    return RedirectResponse("/metrics/cc-cape", status_code=303)
+
+
+@app.get("/metrics/cc-cape", response_class=HTMLResponse)
+def metrics_cc_cape(request: Request):
+    with _open_conn() as tracker_conn:
+        user, redirect = _require_login(request, tracker_conn)
+        if redirect:
+            return redirect
+
+    free_conn = _open_free_data_conn()
+    if free_conn is None:
+        return templates.TemplateResponse(
+            "metrics_cc_cape.html",
+            {
+                "request": request,
+                "user": user,
+                "latest_run": None,
+                "runs": [],
+                "latest_ingestion": None,
+                "message": request.query_params.get("msg", ""),
+                "error": "Free-data DB not found. Run scripts/free_data_pipeline.py first.",
+            },
+        )
+
+    with free_conn:
+        latest_run = free_conn.execute(
+            """
+            SELECT *
+            FROM cc_cape_runs
+            ORDER BY run_id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+        runs = free_conn.execute(
+            """
+            SELECT run_id, run_at, cc_cape, symbols_total, symbols_with_price, symbols_with_valid_cape,
+                   weighting_method, market_cap_coverage, lookback_years, min_eps_points
+            FROM cc_cape_runs
+            ORDER BY run_id DESC
+            LIMIT 30
+            """
+        ).fetchall()
+        ingestion = free_conn.execute(
+            """
+            SELECT run_started_at, run_completed_at, status, details_json
+            FROM ingestion_runs
+            WHERE step = 'pipeline'
+            ORDER BY id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+
+    latest_ingestion = None
+    if ingestion:
+        try:
+            latest_ingestion = {
+                "run_started_at": ingestion["run_started_at"],
+                "run_completed_at": ingestion["run_completed_at"],
+                "status": ingestion["status"],
+                "details": json.loads(ingestion["details_json"] or "{}"),
+            }
+        except Exception:
+            latest_ingestion = {
+                "run_started_at": ingestion["run_started_at"],
+                "run_completed_at": ingestion["run_completed_at"],
+                "status": ingestion["status"],
+                "details": {},
+            }
+
+    return templates.TemplateResponse(
+        "metrics_cc_cape.html",
+        {
+            "request": request,
+            "user": user,
+            "latest_run": latest_run,
+            "runs": runs,
+            "latest_ingestion": latest_ingestion,
+            "message": request.query_params.get("msg", ""),
+            "error": request.query_params.get("error", ""),
+        },
+    )
 
 
 @app.get("/login", response_class=HTMLResponse)
@@ -411,6 +511,96 @@ def api_issue_detail(request: Request, issue_key: str):
         ],
         "generated_at": now_utc(),
         "viewer_role": user["role"],
+    }
+
+
+@app.get("/api/metrics/cc-cape/latest")
+def api_cc_cape_latest(request: Request):
+    with _open_conn() as conn:
+        user = _require_api_login(request, conn)
+
+    free_conn = _open_free_data_conn()
+    if free_conn is None:
+        raise HTTPException(status_code=404, detail="Free-data DB not found.")
+
+    with free_conn:
+        row = free_conn.execute(
+            """
+            SELECT *
+            FROM cc_cape_runs
+            ORDER BY run_id DESC
+            LIMIT 1
+            """
+        ).fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="No CC CAPE runs found.")
+
+    return {
+        "run_id": row["run_id"],
+        "run_at": row["run_at"],
+        "cc_cape": row["cc_cape"],
+        "avg_company_cape": row["avg_company_cape"],
+        "symbols_total": row["symbols_total"],
+        "symbols_with_price": row["symbols_with_price"],
+        "symbols_with_valid_cape": row["symbols_with_valid_cape"],
+        "lookback_years": row["lookback_years"],
+        "min_eps_points": row["min_eps_points"],
+        "weighting_method": row["weighting_method"],
+        "market_cap_coverage": row["market_cap_coverage"],
+        "shiller_cape": row["shiller_cape"],
+        "cape_spread": row["cape_spread"],
+        "viewer_role": user["role"],
+        "generated_at": now_utc(),
+    }
+
+
+@app.get("/api/metrics/cc-cape/runs")
+def api_cc_cape_runs(request: Request, limit: int = 50):
+    if limit < 1 or limit > 500:
+        raise HTTPException(status_code=400, detail="limit must be between 1 and 500")
+
+    with _open_conn() as conn:
+        user = _require_api_login(request, conn)
+
+    free_conn = _open_free_data_conn()
+    if free_conn is None:
+        raise HTTPException(status_code=404, detail="Free-data DB not found.")
+
+    with free_conn:
+        rows = free_conn.execute(
+            """
+            SELECT run_id, run_at, cc_cape, avg_company_cape, symbols_total, symbols_with_price,
+                   symbols_with_valid_cape, weighting_method, market_cap_coverage,
+                   lookback_years, min_eps_points, shiller_cape, cape_spread
+            FROM cc_cape_runs
+            ORDER BY run_id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+
+    return {
+        "count": len(rows),
+        "runs": [
+            {
+                "run_id": r["run_id"],
+                "run_at": r["run_at"],
+                "cc_cape": r["cc_cape"],
+                "avg_company_cape": r["avg_company_cape"],
+                "symbols_total": r["symbols_total"],
+                "symbols_with_price": r["symbols_with_price"],
+                "symbols_with_valid_cape": r["symbols_with_valid_cape"],
+                "weighting_method": r["weighting_method"],
+                "market_cap_coverage": r["market_cap_coverage"],
+                "lookback_years": r["lookback_years"],
+                "min_eps_points": r["min_eps_points"],
+                "shiller_cape": r["shiller_cape"],
+                "cape_spread": r["cape_spread"],
+            }
+            for r in rows
+        ],
+        "viewer_role": user["role"],
+        "generated_at": now_utc(),
     }
 
 

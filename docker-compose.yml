@@ -12,6 +12,7 @@ services:
       TRACKER_SEED: "true"
       TRACKER_HOST: 0.0.0.0
       TRACKER_PORT: "8000"
+      SEC_USER_AGENT: ccCAPE/0.1 (replace-with-your-email@example.com)
     volumes:
       - ./data:/app/data
       - ./docs:/app/docs

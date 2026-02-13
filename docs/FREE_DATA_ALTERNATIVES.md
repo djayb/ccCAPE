@@ -77,3 +77,17 @@ Without paid feeds, this is possible but operationally harder:
 5. Refresh price snapshot.
 6. Recompute CC CAPE + spread.
 7. Run QA checks and publish.
+
+## Current Repo Implementation
+
+Pipeline script:
+
+- `scripts/free_data_pipeline.py`
+
+Storage:
+
+- `data/free_data.db`
+
+Tracker integration:
+
+- Automatically comments on `CAPE-4`, `CAPE-5`, `CAPE-6` and creates/updates a dedicated free-data issue under Phase 1.

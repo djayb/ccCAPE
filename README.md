@@ -52,6 +52,7 @@ Open:
 
 - `TRACKER_SESSION_SECRET`
 - `TRACKER_ADMIN_PASSWORD`
+- `SEC_USER_AGENT` (real contact string for SEC fair-access compliance)
 
 2. Build and run:
 
@@ -134,3 +135,36 @@ Phase 0 execution is tracked in:
 No-paid-data strategy notes:
 
 - `docs/FREE_DATA_ALTERNATIVES.md`
+
+## 9. Free Data Ingestion Pipeline
+
+Run end-to-end free/public ingestion:
+
+```bash
+python3 scripts/free_data_pipeline.py \
+  --facts-limit 25 \
+  --prices-symbol-limit 100 \
+  --update-tracker
+```
+
+What it ingests:
+
+- Wikipedia S&P 500 constituents (including CIKs)
+- SEC company facts by CIK
+- FRED CPI CSV (`CPIAUCSL`)
+- Stooq daily price history
+
+Outputs:
+
+- Free-data DB: `data/free_data.db`
+- Tracker comments/status updates in `data/internal_jira.db`
+
+Run from Docker container:
+
+```bash
+docker compose exec cccape \
+  python3 /app/scripts/free_data_pipeline.py \
+  --facts-limit 25 \
+  --prices-symbol-limit 100 \
+  --update-tracker
+```

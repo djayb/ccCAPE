@@ -46,7 +46,35 @@ Open:
 
 - [http://127.0.0.1:8000](http://127.0.0.1:8000)
 
-## 4. API Usage
+## 4. Run With Docker
+
+1. Set secure values in `docker-compose.yml`:
+
+- `TRACKER_SESSION_SECRET`
+- `TRACKER_ADMIN_PASSWORD`
+
+2. Build and run:
+
+```bash
+docker compose up --build -d
+```
+
+3. Open:
+
+- [http://127.0.0.1:8000](http://127.0.0.1:8000)
+
+Data persistence:
+
+- SQLite DB is mounted at `./data/internal_jira.db`.
+- Export docs are mounted at `./docs/`.
+
+Stop service:
+
+```bash
+docker compose down
+```
+
+## 5. API Usage
 
 The API reuses session authentication from `/login`.
 
@@ -67,7 +95,7 @@ Available endpoints:
 - `GET /api/issues?project=CAPE&status=in_progress`
 - `GET /api/issues/{issue_key}`
 
-## 5. CLI Usage (Core)
+## 6. CLI Usage (Core)
 
 ```bash
 python3 internal_jira.py project-list
@@ -79,7 +107,7 @@ python3 internal_jira.py comment-add --key CAPE-1 --author jean --body "Working 
 python3 internal_jira.py export-markdown --project CAPE --out docs/INTERNAL_TRACKER_SNAPSHOT.md
 ```
 
-## 6. Roles
+## 7. Roles
 
 Supported roles:
 
@@ -96,9 +124,13 @@ python3 internal_jira.py user-update --username pm --role viewer
 python3 internal_jira.py user-update --username pm --active no
 ```
 
-## 7. Start of Phase 0 Execution
+## 8. Start of Phase 0 Execution
 
 Phase 0 execution is tracked in:
 
 - issue updates/comments in the tracker (`CAPE-1`, `CAPE-2`, `CAPE-3`)
 - `docs/PHASE0_EXECUTION_LOG.md`
+
+No-paid-data strategy notes:
+
+- `docs/FREE_DATA_ALTERNATIVES.md`

@@ -1,0 +1,18 @@
+services:
+  cccape:
+    build: .
+    container_name: cccape-tracker
+    ports:
+      - "8000:8000"
+    environment:
+      TRACKER_DB: /app/data/internal_jira.db
+      TRACKER_SESSION_SECRET: change-this-session-secret
+      TRACKER_ADMIN_USER: admin
+      TRACKER_ADMIN_PASSWORD: admin123
+      TRACKER_SEED: "true"
+      TRACKER_HOST: 0.0.0.0
+      TRACKER_PORT: "8000"
+    volumes:
+      - ./data:/app/data
+      - ./docs:/app/docs
+    restart: unless-stopped

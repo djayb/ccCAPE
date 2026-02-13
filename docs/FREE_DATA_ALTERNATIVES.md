@@ -83,6 +83,8 @@ Without paid feeds, this is possible but operationally harder:
 Pipeline script:
 
 - `scripts/free_data_pipeline.py`
+- `scripts/calc_cc_cape_free.py`
+- `scripts/weekly_scheduler.py`
 
 Storage:
 
@@ -91,3 +93,4 @@ Storage:
 Tracker integration:
 
 - Automatically comments on `CAPE-4`, `CAPE-5`, `CAPE-6` and creates/updates a dedicated free-data issue under Phase 1.
+- Automatically comments on `CAPE-8`, `CAPE-9` and creates/updates a dedicated free-calc issue under Phase 2.

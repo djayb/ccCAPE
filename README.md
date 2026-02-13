@@ -168,3 +168,57 @@ docker compose exec cccape \
   --prices-symbol-limit 100 \
   --update-tracker
 ```
+
+## 10. Free-Data CC CAPE Calculation
+
+Run CC CAPE calculation on ingested free data:
+
+```bash
+python3 scripts/calc_cc_cape_free.py \
+  --min-eps-points 8 \
+  --lookback-years 10 \
+  --update-tracker
+```
+
+Outputs:
+
+- Persisted run tables in `data/free_data.db`:
+  - `cc_cape_runs`
+  - `cc_cape_constituent_metrics`
+- Markdown summary:
+  - `docs/CC_CAPE_FREE_RUN.md`
+- Tracker updates on:
+  - `CAPE-8`, `CAPE-9`, and a dedicated free-calc issue under Phase 2.
+
+Optional benchmark spread:
+
+```bash
+python3 scripts/calc_cc_cape_free.py --shiller-cape 31.5
+```
+
+## 11. Weekly Scheduler (Docker Service)
+
+The compose stack now includes `cccape-weekly`, which runs:
+
+1. `scripts/free_data_pipeline.py`
+2. `scripts/calc_cc_cape_free.py`
+
+Default schedule:
+
+- Weekly on Sunday at 09:00 (`WEEKLY_TIMEZONE=America/New_York`)
+- Startup run disabled (`WEEKLY_RUN_ON_STARTUP=false`)
+
+Key scheduler settings in `docker-compose.yml`:
+
+- `WEEKLY_RUN_DAY` (`MON`..`SUN`)
+- `WEEKLY_RUN_HOUR` / `WEEKLY_RUN_MINUTE`
+- `WEEKLY_FACTS_LIMIT`
+- `WEEKLY_PRICES_SYMBOL_LIMIT`
+- `WEEKLY_MIN_EPS_POINTS`
+- `WEEKLY_UPDATE_TRACKER`
+
+Restart scheduler after changing schedule/env:
+
+```bash
+docker compose up --build -d
+```

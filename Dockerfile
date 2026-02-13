@@ -12,7 +12,11 @@ RUN pip install --upgrade pip && pip install -r /app/requirements.txt
 
 COPY . /app
 
-RUN chmod +x /app/internal_jira.py /app/scripts/docker-entrypoint.sh
+RUN chmod +x /app/internal_jira.py \
+    /app/scripts/docker-entrypoint.sh \
+    /app/scripts/free_data_pipeline.py \
+    /app/scripts/calc_cc_cape_free.py \
+    /app/scripts/weekly_scheduler.py
 
 EXPOSE 8000
 

@@ -17,6 +17,7 @@ import argparse
 from bisect import bisect_right
 import datetime as dt
 import json
+import math
 from pathlib import Path
 import sqlite3
 import statistics
@@ -227,8 +228,28 @@ def resolve_cik(conn: sqlite3.Connection, symbol: str, cik_hint: str | None) -> 
     return None
 
 
-def load_eps_series(conn: sqlite3.Connection, cik: str) -> tuple[str, list[tuple[dt.date, float, float | None]]]:
-    """Return (eps_tag, [(end_date, eps_value, cpi_at_end_date_or_none), ...])."""
+def _dedup_latest_by_end_date(rows: list[sqlite3.Row]) -> dict[str, sqlite3.Row]:
+    dedup: dict[str, sqlite3.Row] = {}
+    for row in rows:
+        end_date = row["end_date"] or ""
+        if not end_date:
+            continue
+        current = dedup.get(end_date)
+        if current is None:
+            dedup[end_date] = row
+            continue
+        current_filed = current["filed_date"] or ""
+        candidate_filed = row["filed_date"] or ""
+        if candidate_filed >= current_filed:
+            dedup[end_date] = row
+    return dedup
+
+
+def load_eps_candidates(conn: sqlite3.Connection, cik: str) -> list[tuple[str, list[tuple[dt.date, float]]]]:
+    """Return candidate EPS series: [(eps_tag, [(end_date, eps_value), ...]), ...]."""
+
+    candidates: list[tuple[str, list[tuple[dt.date, float]]]] = []
+
     rows = conn.execute(
         """
         SELECT tag, end_date, filed_date, value, form, fiscal_period, unit
@@ -243,48 +264,95 @@ def load_eps_series(conn: sqlite3.Connection, cik: str) -> tuple[str, list[tuple
         """,
         (cik,),
     ).fetchall()
-    if not rows:
-        return "", []
+    if rows:
+        dedup: dict[tuple[str, str], sqlite3.Row] = {}
+        for row in rows:
+            key = (row["tag"], row["end_date"])
+            current = dedup.get(key)
+            if current is None:
+                dedup[key] = row
+                continue
+            current_filed = current["filed_date"] or ""
+            candidate_filed = row["filed_date"] or ""
+            if candidate_filed >= current_filed:
+                dedup[key] = row
 
-    dedup: dict[tuple[str, str], sqlite3.Row] = {}
-    for row in rows:
-        key = (row["tag"], row["end_date"])
-        current = dedup.get(key)
-        if current is None:
-            dedup[key] = row
-            continue
-        current_filed = current["filed_date"] or ""
-        candidate_filed = row["filed_date"] or ""
-        if candidate_filed >= current_filed:
-            dedup[key] = row
+        by_tag: dict[str, list[sqlite3.Row]] = {tag: [] for tag in EPS_TAGS}
+        for row in dedup.values():
+            if row["tag"] in by_tag:
+                by_tag[row["tag"]].append(row)
+        for tag in EPS_TAGS:
+            by_tag[tag].sort(key=lambda r: r["end_date"])
 
-    by_tag: dict[str, list[sqlite3.Row]] = {tag: [] for tag in EPS_TAGS}
-    for row in dedup.values():
-        if row["tag"] in by_tag:
-            by_tag[row["tag"]].append(row)
-    for tag in EPS_TAGS:
-        by_tag[tag].sort(key=lambda r: r["end_date"])
+        for tag in EPS_TAGS:
+            series: list[tuple[dt.date, float]] = []
+            for row in by_tag[tag]:
+                end_date = parse_date(row["end_date"])
+                if end_date is None:
+                    continue
+                try:
+                    value = float(row["value"])
+                except (TypeError, ValueError):
+                    continue
+                series.append((end_date, value))
+            if series:
+                candidates.append((tag, series))
 
-    basic = by_tag["EarningsPerShareBasic"]
-    diluted = by_tag["EarningsPerShareDiluted"]
-    if len(basic) >= len(diluted):
-        chosen_tag = "EarningsPerShareBasic"
-        chosen_rows = basic
-    else:
-        chosen_tag = "EarningsPerShareDiluted"
-        chosen_rows = diluted
+    # Fallback: computed EPS = NetIncomeLoss / WeightedAvgSharesBasic (annual 10-K / FY).
+    net_income_rows = conn.execute(
+        """
+        SELECT end_date, filed_date, value, form, fiscal_period, unit
+        FROM company_facts_values
+        WHERE cik = ?
+          AND tag = 'NetIncomeLoss'
+          AND value IS NOT NULL
+          AND end_date IS NOT NULL
+          AND (unit LIKE 'USD%' OR unit LIKE 'usd%')
+          AND (form LIKE '10-K%' OR fiscal_period = 'FY')
+        ORDER BY end_date, filed_date
+        """,
+        (cik,),
+    ).fetchall()
+    shares_rows = conn.execute(
+        """
+        SELECT end_date, filed_date, value, form, fiscal_period, unit
+        FROM company_facts_values
+        WHERE cik = ?
+          AND tag = 'WeightedAverageNumberOfSharesOutstandingBasic'
+          AND value IS NOT NULL
+          AND value > 0
+          AND end_date IS NOT NULL
+          AND (form LIKE '10-K%' OR fiscal_period = 'FY')
+        ORDER BY end_date, filed_date
+        """,
+        (cik,),
+    ).fetchall()
+    if net_income_rows and shares_rows:
+        net_by_end = _dedup_latest_by_end_date(net_income_rows)
+        shares_by_end = _dedup_latest_by_end_date(shares_rows)
+        computed: list[tuple[dt.date, float]] = []
+        for end_date, net_row in net_by_end.items():
+            shares_row = shares_by_end.get(end_date)
+            if not shares_row:
+                continue
+            end_dt = parse_date(end_date)
+            if end_dt is None:
+                continue
+            try:
+                net = float(net_row["value"])
+                shares = float(shares_row["value"])
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(net) or not math.isfinite(shares) or shares <= 0:
+                continue
+            eps = net / shares
+            if math.isfinite(eps):
+                computed.append((end_dt, eps))
+        computed.sort(key=lambda item: item[0])
+        if computed:
+            candidates.append(("ComputedEPS(NetIncomeLoss/WeightedAvgSharesBasic)", computed))
 
-    series: list[tuple[dt.date, float, float | None]] = []
-    for row in chosen_rows:
-        end_date = parse_date(row["end_date"])
-        if end_date is None:
-            continue
-        try:
-            value = float(row["value"])
-        except (TypeError, ValueError):
-            continue
-        series.append((end_date, value, None))
-    return chosen_tag, series
+    return candidates
 
 
 def load_shares_series(conn: sqlite3.Connection, cik: str) -> tuple[list[dt.date], list[float]]:
@@ -509,7 +577,7 @@ def compute_and_store_series(args: argparse.Namespace) -> dict[str, Any]:
         market_cap_min_coverage = market_cap_min_coverage_permille / 1000.0
 
         # Preload EPS and shares series for all CIKs we can resolve.
-        eps_cache: dict[str, tuple[str, list[tuple[dt.date, float]]]] = {}
+        eps_cache: dict[str, list[tuple[str, list[tuple[dt.date, float]]]]] = {}
         shares_cache: dict[str, tuple[list[dt.date], list[float]]] = {}
 
         resolved = []
@@ -522,9 +590,7 @@ def compute_and_store_series(args: argparse.Namespace) -> dict[str, Any]:
                 continue
             resolved.append((symbol, cik, row["gics_sector"]))
             if cik not in eps_cache:
-                tag, eps_series_raw = load_eps_series(conn, cik)
-                eps_series = [(d, v) for (d, v, _cpi) in eps_series_raw]
-                eps_cache[cik] = (tag, eps_series)
+                eps_cache[cik] = load_eps_candidates(conn, cik)
             if cik not in shares_cache:
                 shares_cache[cik] = load_shares_series(conn, cik)
 
@@ -566,28 +632,40 @@ def compute_and_store_series(args: argparse.Namespace) -> dict[str, Any]:
                     max_price_used = price_date
                 close_price = float(price_row["close_price"])
 
-                eps_tag, eps_series = eps_cache.get(cik, ("", []))
-                if not eps_series:
+                candidates = eps_cache.get(cik, [])
+                if not candidates:
                     skipped_no_eps += 1
                     continue
 
-                # Filter EPS points within (window_start, obs_date]
-                eps_points = [(d, v) for (d, v) in eps_series if window_start <= d <= obs_date]
-                if len(eps_points) < args.min_eps_points:
-                    skipped_eps_window += 1
-                    continue
+                best_tag = ""
+                best_points = 0
+                best_real_eps_values: list[float] = []
 
-                real_eps_values: list[float] = []
-                for end_d, eps_val in eps_points:
-                    cpi_end = cpi_for_date(end_d, cpi_dates, cpi_values)
-                    if cpi_end is None or cpi_end <= 0:
+                for candidate_tag, eps_series in candidates:
+                    eps_points = [(d, v) for (d, v) in eps_series if window_start <= d <= obs_date]
+                    if len(eps_points) < args.min_eps_points:
                         continue
-                    real_eps_values.append(eps_val * (target_cpi / cpi_end))
-                if len(real_eps_values) < args.min_eps_points:
+
+                    real_eps_values: list[float] = []
+                    for end_d, eps_val in eps_points:
+                        cpi_end = cpi_for_date(end_d, cpi_dates, cpi_values)
+                        if cpi_end is None or cpi_end <= 0:
+                            continue
+                        real_eps_values.append(eps_val * (target_cpi / cpi_end))
+
+                    if len(real_eps_values) < args.min_eps_points:
+                        continue
+
+                    if len(real_eps_values) > best_points:
+                        best_tag = candidate_tag
+                        best_points = len(real_eps_values)
+                        best_real_eps_values = real_eps_values
+
+                if best_points < args.min_eps_points:
                     skipped_eps_window += 1
                     continue
 
-                avg_real_eps = statistics.mean(real_eps_values)
+                avg_real_eps = statistics.mean(best_real_eps_values)
                 if not avg_real_eps or avg_real_eps <= 0:
                     skipped_nonpositive += 1
                     continue
@@ -606,8 +684,8 @@ def compute_and_store_series(args: argparse.Namespace) -> dict[str, Any]:
                         "close_price": close_price,
                         "shares_outstanding": shares,
                         "market_cap": market_cap,
-                        "eps_tag": eps_tag,
-                        "eps_points": len(real_eps_values),
+                        "eps_tag": best_tag,
+                        "eps_points": best_points,
                         "avg_real_eps": avg_real_eps,
                         "company_cape": company_cape,
                     }
@@ -854,4 +932,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

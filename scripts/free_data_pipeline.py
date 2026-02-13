@@ -139,6 +139,12 @@ CREATE TABLE IF NOT EXISTS ingestion_runs (
     status TEXT NOT NULL,
     details_json TEXT
 );
+
+CREATE TABLE IF NOT EXISTS pipeline_kv (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
 """
 
 
@@ -179,6 +185,24 @@ def record_step_run(
         VALUES (?, ?, ?, ?, ?)
         """,
         (run_started_at, now_utc(), step, status, json.dumps(details, sort_keys=True)),
+    )
+    conn.commit()
+
+
+def kv_get(conn: sqlite3.Connection, key: str) -> str | None:
+    row = conn.execute("SELECT value FROM pipeline_kv WHERE key = ?", (key,)).fetchone()
+    return row["value"] if row else None
+
+
+def kv_set(conn: sqlite3.Connection, key: str, value: str) -> None:
+    conn.execute(
+        """
+        INSERT INTO pipeline_kv (key, value, updated_at)
+        VALUES (?, ?, ?)
+        ON CONFLICT(key)
+        DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+        """,
+        (key, value, now_utc()),
     )
     conn.commit()
 
@@ -608,21 +632,37 @@ def fetch_prices_stooq(
     max_rows_per_symbol: int,
     request_delay: float,
 ) -> dict[str, Any]:
+    cursor_before = kv_get(conn, "stooq_prices_cursor")
     existing = {
         normalize_symbol(row["symbol"])
         for row in conn.execute(
             "SELECT DISTINCT symbol FROM daily_prices WHERE source = 'stooq'"
         ).fetchall()
     }
-    missing_symbols = [normalize_symbol(sym) for sym in symbols if normalize_symbol(sym) not in existing]
-    existing_symbols = [normalize_symbol(sym) for sym in symbols if normalize_symbol(sym) in existing]
+    normalized_symbols = []
+    seen = set()
+    for sym in symbols:
+        norm = normalize_symbol(sym)
+        if not norm or norm in seen:
+            continue
+        seen.add(norm)
+        normalized_symbols.append(norm)
+
+    missing_symbols = [sym for sym in normalized_symbols if sym not in existing]
+    existing_symbols = [sym for sym in normalized_symbols if sym in existing]
     ordered_symbols = missing_symbols + existing_symbols
 
+    if cursor_before and cursor_before in ordered_symbols:
+        start_idx = ordered_symbols.index(cursor_before) + 1
+        ordered_symbols = ordered_symbols[start_idx:] + ordered_symbols[:start_idx]
+
+    rotation_start = ordered_symbols[0] if ordered_symbols else None
     selected_symbols = ordered_symbols[:symbol_limit] if symbol_limit > 0 else ordered_symbols
     inserted_rows = 0
     failures = []
     rate_limited = False
     rate_limit_symbol: str | None = None
+    last_nonlimited_symbol: str | None = None
 
     for idx, symbol in enumerate(selected_symbols, start=1):
         count, body, limited = fetch_symbol_prices_stooq(
@@ -634,6 +674,7 @@ def fetch_prices_stooq(
             rate_limited = True
             rate_limit_symbol = symbol
             break
+        last_nonlimited_symbol = symbol
         if count == 0 or body is None:
             failures.append(symbol)
         else:
@@ -647,14 +688,23 @@ def fetch_prices_stooq(
             time.sleep(request_delay)
 
     conn.commit()
+
+    cursor_after = cursor_before
+    if last_nonlimited_symbol:
+        kv_set(conn, "stooq_prices_cursor", last_nonlimited_symbol)
+        cursor_after = last_nonlimited_symbol
     return {
         "status": "rate_limited" if rate_limited else "success",
+        "cursor_before": cursor_before,
+        "cursor_after": cursor_after,
+        "rotation_start": rotation_start,
         "symbols_requested": len(selected_symbols),
         "symbols_processed": idx if selected_symbols else 0,
         "rows_written": inserted_rows,
         "symbol_failures": len(failures),
         "failed_symbols": failures[:20],
         "rate_limit_symbol": rate_limit_symbol,
+        "missing_symbols_count": len(missing_symbols),
     }
 
 
@@ -1038,27 +1088,69 @@ def update_tracker_with_summary(
         if free_data_issue_key:
             tracker_results["tracked_issues"].append(free_data_issue_key)
 
+        steps = summary.get("steps") or {}
+
+        def step_dict(name: str) -> dict[str, Any]:
+            value = steps.get(name)
+            return value if isinstance(value, dict) else {}
+
+        constituents = step_dict("constituents")
+        sec_map = step_dict("sec_ticker_map")
+        cpi = step_dict("cpi")
+        shiller = step_dict("shiller_cape")
+        company_facts = step_dict("company_facts")
+        prices = step_dict("prices")
+        quality = step_dict("quality_checks")
+
+        def _skipped_line(label: str, step: dict[str, Any]) -> str | None:
+            if step.get("status") != "skipped":
+                return None
+            reason = step.get("reason") or ""
+            reason_text = f" ({reason})" if reason else ""
+            return f"{label}: skipped{reason_text}"
+
+        company_line = _skipped_line("Company facts", company_facts)
+        if company_line is None:
+            company_line = (
+                "Company facts: "
+                f"{company_facts.get('facts_fetched', 0)} fetched, "
+                f"{company_facts.get('facts_failed', 0)} failed, "
+                f"{company_facts.get('missing_cik', 0)} missing CIK"
+            )
+
+        prices_line = _skipped_line("Prices", prices)
+        if prices_line is None:
+            status = prices.get("status")
+            status_text = f" ({status})" if status and status != "success" else ""
+            cursor_after = prices.get("cursor_after")
+            cursor_text = f", cursor={cursor_after}" if cursor_after else ""
+            rate_symbol = prices.get("rate_limit_symbol")
+            rate_text = f", rate_limit_symbol={rate_symbol}" if rate_symbol else ""
+            prices_line = (
+                "Prices: "
+                f"{prices.get('rows_written', 0)} rows, "
+                f"{prices.get('symbol_failures', 0)} symbol failures"
+                f"{status_text}{cursor_text}{rate_text}"
+            )
+
         body = (
-            f"Free-data pipeline run completed at {summary['completed_at']} UTC.\n\n"
-            f"Constituents: {summary['steps']['constituents'].get('records', 0)}\n"
-            f"SEC ticker map: {summary['steps']['sec_ticker_map'].get('status')} "
-            f"({summary['steps']['sec_ticker_map'].get('records', 0)} rows)\n"
-            f"CPI: {summary['steps']['cpi'].get('status')} "
-            f"({summary['steps']['cpi'].get('records', 0)} rows)\n"
-            f"Shiller CAPE: {summary['steps'].get('shiller_cape', {}).get('status')} "
-            f"(through {summary['steps'].get('shiller_cape', {}).get('max_observation_date', '-')})\n"
-            f"Company facts: {summary['steps']['company_facts'].get('facts_fetched', 0)} fetched, "
-            f"{summary['steps']['company_facts'].get('facts_failed', 0)} failed, "
-            f"{summary['steps']['company_facts'].get('missing_cik', 0)} missing CIK\n"
-            f"Prices: {summary['steps']['prices'].get('rows_written', 0)} rows, "
-            f"{summary['steps']['prices'].get('symbol_failures', 0)} symbol failures\n"
-            f"Quality checks: missing CIK {summary['steps']['quality_checks'].get('missing_cik_count', 0)}, "
-            f"priced symbols {summary['steps']['quality_checks'].get('priced_symbol_count', 0)}, "
-            f"facts CIKs {summary['steps']['quality_checks'].get('facts_cik_count', 0)}"
+            f"Free-data pipeline run completed at {summary.get('completed_at') or '-'} UTC.\n\n"
+            f"Constituents: {constituents.get('records', 0)}\n"
+            f"SEC ticker map: {sec_map.get('status', '-')} "
+            f"({sec_map.get('records', 0)} rows)\n"
+            f"CPI: {cpi.get('status', '-')} "
+            f"({cpi.get('records', 0)} rows)\n"
+            f"Shiller CAPE: {shiller.get('status', '-')} "
+            f"(through {shiller.get('max_observation_date', '-')})\n"
+            f"{company_line}\n"
+            f"{prices_line}\n"
+            f"Quality checks: missing CIK {quality.get('missing_cik_count', 0)}, "
+            f"priced symbols {quality.get('priced_symbol_count', 0)}, "
+            f"facts CIKs {quality.get('facts_cik_count', 0)}"
         )
         warnings = []
         warnings.extend(summary.get("warnings") or [])
-        warnings.extend(summary.get("steps", {}).get("quality_checks", {}).get("warnings") or [])
+        warnings.extend(quality.get("warnings") or [])
         deduped = []
         seen = set()
         for item in warnings:
@@ -1167,29 +1259,50 @@ def run_pipeline(args: argparse.Namespace) -> int:
         run_step("shiller_cape", lambda: fetch_shiller_cape_multpl(session, conn))
 
         constituents = load_latest_constituents(conn)
-        run_step(
-            "company_facts",
-            lambda: fetch_company_facts(
-                session,
+        if args.skip_company_facts:
+            summary["steps"]["company_facts"] = {"status": "skipped", "reason": "--skip-company-facts"}
+            record_step_run(
                 conn,
-                constituents=constituents,
-                cik_limit=args.facts_limit,
-                request_delay=args.request_delay,
-                selected_tags=tuple(args.sec_tags),
-                stale_days=args.facts_stale_days,
-            ),
-        )
-        run_step(
-            "prices",
-            lambda: fetch_prices_stooq(
-                session,
+                run_started_at=run_started_at,
+                step="company_facts",
+                status="skipped",
+                details=summary["steps"]["company_facts"],
+            )
+        else:
+            run_step(
+                "company_facts",
+                lambda: fetch_company_facts(
+                    session,
+                    conn,
+                    constituents=constituents,
+                    cik_limit=args.facts_limit,
+                    request_delay=args.request_delay,
+                    selected_tags=tuple(args.sec_tags),
+                    stale_days=args.facts_stale_days,
+                ),
+            )
+
+        if args.skip_prices:
+            summary["steps"]["prices"] = {"status": "skipped", "reason": "--skip-prices"}
+            record_step_run(
                 conn,
-                symbols=[row["symbol"] for row in constituents],
-                symbol_limit=args.prices_symbol_limit,
-                max_rows_per_symbol=args.prices_rows_per_symbol,
-                request_delay=args.request_delay,
-            ),
-        )
+                run_started_at=run_started_at,
+                step="prices",
+                status="skipped",
+                details=summary["steps"]["prices"],
+            )
+        else:
+            run_step(
+                "prices",
+                lambda: fetch_prices_stooq(
+                    session,
+                    conn,
+                    symbols=[row["symbol"] for row in constituents],
+                    symbol_limit=args.prices_symbol_limit,
+                    max_rows_per_symbol=args.prices_rows_per_symbol,
+                    request_delay=args.request_delay,
+                ),
+            )
         run_step("quality_checks", lambda: run_quality_checks(conn))
 
         # Merge pipeline-level warnings into quality checks so the UI can surface them.
@@ -1274,6 +1387,7 @@ def build_parser() -> argparse.ArgumentParser:
         default=list(DEFAULT_TAGS),
         help="SEC XBRL tags to persist from company facts.",
     )
+    parser.add_argument("--skip-company-facts", action="store_true", default=False, help="Skip SEC company facts fetch step.")
     parser.add_argument(
         "--update-tracker",
         action=argparse.BooleanOptionalAction,
@@ -1281,6 +1395,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="When enabled, post run summaries into tracker issues.",
     )
     parser.add_argument("--tracker-author", default="data-bot", help="Author name for tracker comments/events.")
+    parser.add_argument("--skip-prices", action="store_true", default=False, help="Skip Stooq price fetch step.")
     return parser
 
 

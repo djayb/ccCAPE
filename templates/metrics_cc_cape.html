@@ -107,6 +107,15 @@
 </section>
 
 <section class="panel" style="margin-top: 1rem;">
+  <h2>Benchmark (Long History)</h2>
+  <div class="muted">Shiller CAPE monthly history (last 50 years, when available).</div>
+  <div style="margin-top: 0.75rem;">
+    <canvas id="shillerLongChart" class="chart-canvas" height="220"></canvas>
+  </div>
+  <div id="shillerChartError" class="muted" style="margin-top: 0.5rem;"></div>
+</section>
+
+<section class="panel" style="margin-top: 1rem;">
   <h2>Recent CC CAPE Runs</h2>
   {% if runs|length == 0 %}
     <p class="muted">none</p>
@@ -260,12 +269,42 @@
     ctx.fillText(labels[labels.length - 1], pad.l + plotW, pad.t + plotH + 8);
   }
 
+  async function renderShillerLong() {
+    const errorEl = document.getElementById("shillerChartError");
+    const canvas = document.getElementById("shillerLongChart");
+    if (!canvas) return;
+    try {
+      const resp = await fetch("/api/metrics/shiller-cape/series/monthly?years=50", {
+        headers: { Accept: "application/json" },
+      });
+      if (!resp.ok) {
+        throw new Error("Failed to load Shiller series (" + resp.status + ")");
+      }
+      const payload = await resp.json();
+      const series = (payload && payload.series) ? payload.series : [];
+      if (series.length < 2) {
+        errorEl.textContent = "Not enough Shiller CAPE observations to chart yet.";
+        return;
+      }
+      const labels = series.map((p) => String(p.observation_date || "").slice(0, 10));
+      const shiller = series.map((p) => toNumber(p.shiller_cape));
+      drawLineChart(canvas, labels, [
+        { name: "Shiller", data: shiller, color: "#067647" },
+      ], { yDecimals: 1 });
+      errorEl.textContent = "";
+    } catch (err) {
+      errorEl.textContent = "Benchmark chart error: " + (err && err.message ? err.message : String(err));
+    }
+  }
+
   async function loadAndRender() {
     const errorEl = document.getElementById("chartError");
+    renderShillerLong().catch(function () {});
     try {
       // 1) Prefer monthly backfilled series if present.
       try {
-        const seriesResp = await fetch("/api/metrics/cc-cape/series/monthly?limit=240", {
+        // 50y ~= 600 points; keep some headroom.
+        const seriesResp = await fetch("/api/metrics/cc-cape/series/monthly?limit=720", {
           headers: { Accept: "application/json" },
         });
         if (seriesResp.ok) {

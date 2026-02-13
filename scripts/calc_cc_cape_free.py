@@ -284,7 +284,33 @@ def resolve_cik(conn: sqlite3.Connection, symbol: str, cik_hint: str | None) -> 
     return None
 
 
-def select_eps_series(conn: sqlite3.Connection, cik: str) -> tuple[str, list[sqlite3.Row]]:
+def _dedup_latest_by_end_date(rows: list[sqlite3.Row]) -> dict[str, sqlite3.Row]:
+    dedup: dict[str, sqlite3.Row] = {}
+    for row in rows:
+        end_date = row["end_date"] or ""
+        if not end_date:
+            continue
+        current = dedup.get(end_date)
+        if current is None:
+            dedup[end_date] = row
+            continue
+        current_filed = current["filed_date"] or ""
+        candidate_filed = row["filed_date"] or ""
+        if candidate_filed >= current_filed:
+            dedup[end_date] = row
+    return dedup
+
+
+def eps_candidates(conn: sqlite3.Connection, cik: str) -> list[tuple[str, list[dict[str, Any]]]]:
+    """Return candidate EPS series to try in the CAPE denominator.
+
+    Priority is decided later (after windowing + CPI adjustment). We include:
+    - reported EPS basic/diluted (if present)
+    - computed EPS from NetIncomeLoss / WeightedAverageNumberOfSharesOutstandingBasic (if present)
+    """
+
+    candidates: list[tuple[str, list[dict[str, Any]]]] = []
+
     rows = conn.execute(
         """
         SELECT tag, end_date, filed_date, value, form, fiscal_period, unit
@@ -300,34 +326,85 @@ def select_eps_series(conn: sqlite3.Connection, cik: str) -> tuple[str, list[sql
         (cik,),
     ).fetchall()
 
-    if not rows:
-        return "", []
-
-    dedup: dict[tuple[str, str], sqlite3.Row] = {}
-    for row in rows:
-        key = (row["tag"], row["end_date"])
-        current = dedup.get(key)
-        if current is None:
-            dedup[key] = row
-        else:
-            current_filed = current["filed_date"] or ""
-            candidate_filed = row["filed_date"] or ""
-            if candidate_filed >= current_filed:
+    if rows:
+        dedup: dict[tuple[str, str], sqlite3.Row] = {}
+        for row in rows:
+            key = (row["tag"], row["end_date"])
+            current = dedup.get(key)
+            if current is None:
                 dedup[key] = row
+            else:
+                current_filed = current["filed_date"] or ""
+                candidate_filed = row["filed_date"] or ""
+                if candidate_filed >= current_filed:
+                    dedup[key] = row
 
-    by_tag = {tag: [] for tag in EPS_TAGS}
-    for (_, _), row in dedup.items():
-        by_tag[row["tag"]].append(row)
+        for tag in EPS_TAGS:
+            series = [dict(r) for (t, _), r in dedup.items() if t == tag]
+            series.sort(key=lambda r: r["end_date"] or "")
+            if series:
+                candidates.append((tag, series))
 
-    for tag in EPS_TAGS:
-        by_tag[tag].sort(key=lambda r: r["end_date"])
+    # Fallback: compute EPS = NetIncomeLoss / WeightedAvgSharesBasic when reported EPS is missing.
+    net_income_rows = conn.execute(
+        """
+        SELECT end_date, filed_date, value, form, fiscal_period, unit
+        FROM company_facts_values
+        WHERE cik = ?
+          AND tag = 'NetIncomeLoss'
+          AND value IS NOT NULL
+          AND end_date IS NOT NULL
+          AND (unit LIKE 'USD%' OR unit LIKE 'usd%')
+          AND (form LIKE '10-K%' OR fiscal_period = 'FY')
+        ORDER BY end_date, filed_date
+        """,
+        (cik,),
+    ).fetchall()
+    shares_rows = conn.execute(
+        """
+        SELECT end_date, filed_date, value, form, fiscal_period, unit
+        FROM company_facts_values
+        WHERE cik = ?
+          AND tag = 'WeightedAverageNumberOfSharesOutstandingBasic'
+          AND value IS NOT NULL
+          AND value > 0
+          AND end_date IS NOT NULL
+          AND (form LIKE '10-K%' OR fiscal_period = 'FY')
+        ORDER BY end_date, filed_date
+        """,
+        (cik,),
+    ).fetchall()
+    if net_income_rows and shares_rows:
+        net_by_end = _dedup_latest_by_end_date(net_income_rows)
+        shares_by_end = _dedup_latest_by_end_date(shares_rows)
+        computed: list[dict[str, Any]] = []
+        for end_date, net_row in net_by_end.items():
+            shares_row = shares_by_end.get(end_date)
+            if not shares_row:
+                continue
+            try:
+                net = float(net_row["value"])
+                shares = float(shares_row["value"])
+            except (TypeError, ValueError):
+                continue
+            if not math.isfinite(net) or not math.isfinite(shares) or shares <= 0:
+                continue
+            eps = net / shares
+            if not math.isfinite(eps):
+                continue
+            computed.append(
+                {
+                    "end_date": end_date,
+                    "filed_date": max(net_row["filed_date"] or "", shares_row["filed_date"] or ""),
+                    "value": eps,
+                    "unit": "USD/shares",
+                }
+            )
+        computed.sort(key=lambda r: r["end_date"] or "")
+        if computed:
+            candidates.append(("ComputedEPS(NetIncomeLoss/WeightedAvgSharesBasic)", computed))
 
-    basic = by_tag["EarningsPerShareBasic"]
-    diluted = by_tag["EarningsPerShareDiluted"]
-
-    if len(basic) >= len(diluted):
-        return "EarningsPerShareBasic", basic
-    return "EarningsPerShareDiluted", diluted
+    return candidates
 
 
 def latest_shares_outstanding(conn: sqlite3.Connection, cik: str) -> float | None:
@@ -377,34 +454,48 @@ def compute_company_metrics(
     if close_price <= 0:
         return None
 
-    eps_tag, eps_rows = select_eps_series(conn, cik)
-    if not eps_rows:
+    candidates = eps_candidates(conn, cik)
+    if not candidates:
         return None
 
     cutoff_date = price_date - dt.timedelta(days=365 * lookback_years + 3)
 
-    real_eps_values = []
-    for row in eps_rows:
-        end_date = parse_date(row["end_date"])
-        if end_date is None:
-            continue
-        if end_date < cutoff_date or end_date > price_date:
-            continue
-        try:
-            eps_value = float(row["value"])
-        except (TypeError, ValueError):
-            continue
-        cpi_then = cpi_for_date(end_date, cpi_dates, cpi_values)
-        if cpi_then is None or cpi_then <= 0:
-            continue
-        real_eps = eps_value * (latest_cpi / cpi_then)
-        if math.isfinite(real_eps):
-            real_eps_values.append(real_eps)
+    best_tag = ""
+    best_real_eps_values: list[float] = []
+    best_points = 0
 
-    if len(real_eps_values) < min_eps_points:
+    for candidate_tag, series_rows in candidates:
+        real_eps_values: list[float] = []
+        for row in series_rows:
+            end_date = parse_date(str(row.get("end_date") if isinstance(row, dict) else row["end_date"]))
+            if end_date is None:
+                continue
+            if end_date < cutoff_date or end_date > price_date:
+                continue
+            try:
+                eps_value = float(row.get("value") if isinstance(row, dict) else row["value"])
+            except (TypeError, ValueError):
+                continue
+            cpi_then = cpi_for_date(end_date, cpi_dates, cpi_values)
+            if cpi_then is None or cpi_then <= 0:
+                continue
+            real_eps = eps_value * (latest_cpi / cpi_then)
+            if math.isfinite(real_eps):
+                real_eps_values.append(real_eps)
+
+        if len(real_eps_values) < min_eps_points:
+            continue
+
+        # Pick the densest candidate series within the window.
+        if len(real_eps_values) > best_points:
+            best_tag = candidate_tag
+            best_real_eps_values = real_eps_values
+            best_points = len(real_eps_values)
+
+    if best_points < min_eps_points:
         return None
 
-    avg_real_eps = statistics.mean(real_eps_values)
+    avg_real_eps = statistics.mean(best_real_eps_values)
     if not math.isfinite(avg_real_eps) or avg_real_eps <= 0:
         return None
 
@@ -423,8 +514,8 @@ def compute_company_metrics(
         "close_price": close_price,
         "shares_outstanding": shares,
         "market_cap": market_cap,
-        "eps_tag": eps_tag,
-        "eps_points": len(real_eps_values),
+        "eps_tag": best_tag,
+        "eps_points": best_points,
         "avg_real_eps": avg_real_eps,
         "company_cape": company_cape,
     }

@@ -100,6 +100,34 @@ def run_job(args: argparse.Namespace) -> tuple[int, int]:
     pipeline_code = run_command(pipeline_cmd)
     calc_code = run_command(calc_cmd)
 
+    series_code = 0
+    if args.series_enabled and pipeline_code == 0 and calc_code == 0:
+        series_cmd = [
+            sys.executable,
+            str(ROOT_DIR / "scripts" / "backfill_cc_cape_series_free.py"),
+            "--data-db",
+            args.data_db,
+            "--tracker-db",
+            args.tracker_db,
+            "--series-years",
+            str(args.series_years),
+            "--max-symbols",
+            str(args.series_max_symbols),
+            "--min-eps-points",
+            str(args.min_eps_points),
+            "--lookback-years",
+            str(args.lookback_years),
+            "--market-cap-min-coverage",
+            str(args.market_cap_min_coverage),
+        ]
+        if args.update_tracker:
+            series_cmd.append("--update-tracker")
+        else:
+            series_cmd.append("--no-update-tracker")
+        series_code = run_command(series_cmd)
+        if series_code != 0:
+            log("Monthly series backfill failed (non-zero exit); continuing.")
+
     kpi_code = 0
     if args.kpi_enabled:
         kpi_cmd = [
@@ -157,6 +185,14 @@ def main() -> int:
     shiller_env = os.getenv("WEEKLY_SHILLER_CAPE", "")
     parser.add_argument("--shiller-cape", type=float, default=float(shiller_env) if shiller_env else None)
     parser.add_argument("--calc-markdown-path", default=os.getenv("WEEKLY_CALC_MARKDOWN_PATH", "docs/CC_CAPE_FREE_RUN.md"))
+    parser.add_argument(
+        "--series-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=(os.getenv("WEEKLY_SERIES_ENABLED", "true").lower() in {"1", "true", "yes"}),
+        help="Backfill/update the monthly CC CAPE series after each scheduled run.",
+    )
+    parser.add_argument("--series-years", type=int, default=int(os.getenv("WEEKLY_SERIES_YEARS", "10")))
+    parser.add_argument("--series-max-symbols", type=int, default=int(os.getenv("WEEKLY_SERIES_MAX_SYMBOLS", "0")))
     parser.add_argument(
         "--kpi-enabled",
         action=argparse.BooleanOptionalAction,

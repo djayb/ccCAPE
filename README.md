@@ -223,6 +223,7 @@ The compose stack now includes `cccape-weekly`, which runs:
 
 1. `scripts/free_data_pipeline.py`
 2. `scripts/calc_cc_cape_free.py`
+3. `scripts/backfill_cc_cape_series_free.py` (monthly series refresh)
 
 Default schedule:
 
@@ -237,6 +238,8 @@ Key scheduler settings in `docker-compose.yml`:
 - `WEEKLY_PRICES_SYMBOL_LIMIT`
 - `WEEKLY_MIN_EPS_POINTS`
 - `WEEKLY_UPDATE_TRACKER`
+- `WEEKLY_SERIES_ENABLED`
+- `WEEKLY_SERIES_YEARS`
 
 Restart scheduler after changing schedule/env:
 

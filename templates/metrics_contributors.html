@@ -124,7 +124,68 @@
   <section class="panel" style="margin-top: 1rem;">
     <h2>All Constituents</h2>
     <div class="muted">API: <code>/api/metrics/cc-cape/constituents?run_id={{ run.run_id }}&limit=500</code></div>
+    <div class="toolbar" style="margin-top: 0.75rem;">
+      <div class="muted">Showing {{ all_constituents|length }} of {{ run.symbols_with_valid_cape }} constituents with valid CAPE in this run.</div>
+      <form method="get" action="/metrics/cc-cape/contributors" class="inline-form">
+        <input type="hidden" name="run_id" value="{{ run.run_id }}" />
+        <input type="hidden" name="top_n" value="{{ top_constituents|length if top_constituents is defined else 25 }}" />
+        <input name="q" value="{{ q }}" placeholder="Search symbol / security / sector" />
+        <select name="sort">
+          <option value="weight" {% if sort == "weight" %}selected{% endif %}>Sort: Weight</option>
+          <option value="contribution" {% if sort == "contribution" %}selected{% endif %}>Sort: Contribution</option>
+          <option value="cape" {% if sort == "cape" %}selected{% endif %}>Sort: CAPE</option>
+          <option value="symbol" {% if sort == "symbol" %}selected{% endif %}>Sort: Symbol</option>
+        </select>
+        <input name="limit" type="number" min="5" max="5000" value="{{ limit }}" style="width: 6.5rem;" />
+        <button type="submit" class="btn btn-secondary">Apply</button>
+      </form>
+    </div>
+    {% if all_constituents|length == 0 %}
+      <p class="muted">none</p>
+    {% else %}
+      <div style="overflow-x: auto;">
+        <table class="table">
+          <thead>
+            <tr>
+              <th>Symbol</th>
+              <th>Security</th>
+              <th>Sector</th>
+              <th>Weight</th>
+              <th>Company CAPE</th>
+              <th>Contribution</th>
+              <th>EPS Tag</th>
+              <th>EPS Pts</th>
+              <th>Price Date</th>
+              <th>Close</th>
+              <th>Market Cap (B)</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for c in all_constituents %}
+            <tr>
+              <td><code>{{ c.symbol }}</code></td>
+              <td>{{ c.security if c.security else "-" }}</td>
+              <td>{{ c.gics_sector if c.gics_sector else "-" }}</td>
+              <td>{{ "%.4f"|format(c.weight) }}</td>
+              <td>{{ "%.2f"|format(c.company_cape) }}</td>
+              <td>{{ "%.4f"|format(c.contribution) }}</td>
+              <td><code>{{ c.eps_tag }}</code></td>
+              <td>{{ c.eps_points }}</td>
+              <td>{{ c.price_date }}</td>
+              <td>{{ "%.2f"|format(c.close_price) }}</td>
+              <td>
+                {% if c.market_cap is not none %}
+                  {{ "%.1f"|format(c.market_cap / 1000000000.0) }}
+                {% else %}
+                  -
+                {% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% endif %}
   </section>
 {% endif %}
 {% endblock %}
-

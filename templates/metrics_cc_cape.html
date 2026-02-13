@@ -33,6 +33,12 @@
       <p><strong>Market-Cap Coverage:</strong> {{ "%.3f"|format(latest_run.market_cap_coverage) }}</p>
       <p><strong>Lookback:</strong> {{ latest_run.lookback_years }} years</p>
       <p><strong>Min EPS Points:</strong> {{ latest_run.min_eps_points }}</p>
+      {% if latest_run_notes and latest_run_notes.get("methodology_version") %}
+        <p><strong>Methodology:</strong> <code>{{ latest_run_notes.get("methodology_version") }}</code></p>
+      {% endif %}
+      {% if latest_run_notes and latest_run_notes.get("eps_period_days_min") is not none %}
+        <p><strong>EPS Period Min Days:</strong> {{ latest_run_notes.get("eps_period_days_min") }}</p>
+      {% endif %}
       {% if latest_run.get("shiller_cape") is not none %}
         <p>
           <strong>Shiller CAPE:</strong> {{ "%.4f"|format(latest_run.get("shiller_cape")) }}

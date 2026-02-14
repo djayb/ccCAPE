@@ -56,6 +56,9 @@ services:
       # Target horizon for monthly backfill. Actual CC CAPE availability is constrained by fundamentals coverage.
       WEEKLY_SERIES_YEARS: "50"
       WEEKLY_SERIES_MAX_SYMBOLS: "0"
+      WEEKLY_QA_ENABLED: "true"
+      WEEKLY_QA_MARKDOWN_PATH: /app/docs/QA_REPORT.md
+      WEEKLY_QA_SERIES_COVERAGE_THRESHOLD: "0.7"
     volumes:
       - ./data:/app/data
       - ./docs:/app/docs

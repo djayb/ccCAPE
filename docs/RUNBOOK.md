@@ -97,6 +97,12 @@ Generate a KPI baseline report (markdown):
 python3 scripts/generate_kpi_report.py --out docs/KPI_BASELINE.md --update-tracker
 ```
 
+Generate a QA (data quality) report (markdown):
+
+```bash
+python3 scripts/generate_qa_report.py --out docs/QA_REPORT.md --update-tracker
+```
+
 ## Common Failures and Fixes
 
 ### SEC endpoints return 403

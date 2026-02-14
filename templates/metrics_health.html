@@ -86,6 +86,17 @@
 
 <section class="panel" style="margin-top: 1rem;">
   <h2>Reports</h2>
+  {% if qa_report %}
+    <p>
+      <strong>QA report:</strong>
+      <a href="/docs/view/{{ qa_report.relpath }}"><code>docs/{{ qa_report.relpath }}</code></a>
+      <span class="muted">(updated {{ qa_report.mtime }})</span>
+    </p>
+  {% else %}
+    <p class="muted">QA report not found yet.</p>
+    <p class="muted">Run: <code>python3 scripts/generate_qa_report.py --out docs/QA_REPORT.md --update-tracker</code></p>
+  {% endif %}
+
   {% if kpi_report %}
     <p>
       <strong>KPI baseline:</strong>

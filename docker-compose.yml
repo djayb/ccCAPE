@@ -34,9 +34,14 @@ services:
       WEEKLY_RUN_ON_STARTUP: "false"
       WEEKLY_UPDATE_TRACKER: "true"
       WEEKLY_FACTS_LIMIT: "200"
+      WEEKLY_FACTS_STALE_DAYS: "30"
+      # When true, focus on filling missing facts first (no stale refresh).
+      WEEKLY_FACTS_MISSING_ONLY: "false"
       WEEKLY_PRICES_SYMBOL_LIMIT: "503"
       # 0 = store full price history from Stooq (max available).
       WEEKLY_PRICES_ROWS_PER_SYMBOL: "0"
+      # When true, focus on filling missing prices first.
+      WEEKLY_PRICES_MISSING_ONLY: "false"
       WEEKLY_REQUEST_DELAY: "0.25"
       WEEKLY_MIN_EPS_POINTS: "8"
       WEEKLY_LOOKBACK_YEARS: "10"

@@ -183,6 +183,14 @@ Optional: refresh latest closes with fewer HTTP requests (bulk quotes):
 python3 scripts/fetch_stooq_quotes.py --data-db data/free_data.db
 ```
 
+Optional: fix edge-case mappings deterministically (CIK / Stooq ticker):
+
+```bash
+python3 scripts/manage_symbol_overrides.py --data-db data/free_data.db set --symbol BRK.B --stooq-symbol brk-b
+python3 scripts/manage_symbol_overrides.py --data-db data/free_data.db set --symbol XYZ --cik 0000123456
+python3 scripts/manage_symbol_overrides.py --data-db data/free_data.db list
+```
+
 Run from Docker container:
 
 ```bash

@@ -63,6 +63,13 @@ Purpose: raw ingested datasets + curated computed metrics.
   - Key: `(symbol, price_date, source)`
   - Lineage: `fetched_at`, `source`
 
+- `symbol_overrides`
+  - Key: `symbol`
+  - Optional manual overrides for:
+    - `cik` (symbol -> CIK)
+    - `stooq_symbol` (symbol -> Stooq base ticker used for price fetch)
+  - Useful for deterministic edge-case fixes.
+
 - `ingestion_runs`
   - Step-level and pipeline-level logs of ingestion runs
   - `details_json` includes row counts and warnings

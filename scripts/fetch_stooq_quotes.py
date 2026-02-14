@@ -71,6 +71,22 @@ def stooq_ticker_for_symbol(symbol: str) -> str:
     return normalize_symbol(symbol).lower().replace(".", "-") + ".us"
 
 
+def load_stooq_symbol_overrides(conn: sqlite3.Connection) -> dict[str, str]:
+    if not table_exists(conn, "symbol_overrides"):
+        return {}
+    rows = conn.execute("SELECT symbol, stooq_symbol FROM symbol_overrides").fetchall()
+    mapping: dict[str, str] = {}
+    for row in rows:
+        sym = normalize_symbol(row["symbol"])
+        stooq_sym = (row["stooq_symbol"] or "").strip().lower()
+        if not sym or not stooq_sym:
+            continue
+        if stooq_sym.endswith(".us"):
+            stooq_sym = stooq_sym[:-3]
+        mapping[sym] = stooq_sym
+    return mapping
+
+
 def chunk_tickers(tickers: list[str], *, max_chunk: int, max_url_len: int) -> list[list[str]]:
     chunks: list[list[str]] = []
     cur: list[str] = []
@@ -147,8 +163,16 @@ def fetch_and_store_quotes(args: argparse.Namespace) -> dict[str, Any]:
         if args.max_symbols > 0:
             symbols = symbols[: args.max_symbols]
 
-        tickers = [stooq_ticker_for_symbol(s) for s in symbols]
-        ticker_base_to_symbol = {t.split(".")[0].lower(): sym for t, sym in zip(tickers, symbols)}
+        stooq_overrides = load_stooq_symbol_overrides(conn)
+        tickers: list[str] = []
+        ticker_base_to_symbol: dict[str, str] = {}
+        for sym in symbols:
+            override = stooq_overrides.get(sym)
+            ticker = (override + ".us") if override else stooq_ticker_for_symbol(sym)
+            tickers.append(ticker)
+            base = ticker.split(".")[0].lower()
+            # If duplicates exist, keep the first and let the later one fall into failures.
+            ticker_base_to_symbol.setdefault(base, sym)
 
         summary["symbols_total"] = len(symbols)
         summary["symbols_requested"] = len(symbols)

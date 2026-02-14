@@ -43,6 +43,11 @@ services:
       # When true, focus on filling missing prices first.
       WEEKLY_PRICES_MISSING_ONLY: "false"
       WEEKLY_REQUEST_DELAY: "0.25"
+      # Refresh latest quotes in bulk after ingestion to reduce price staleness.
+      WEEKLY_QUOTES_ENABLED: "true"
+      WEEKLY_QUOTES_CHUNK_SIZE: "75"
+      WEEKLY_QUOTES_REQUEST_DELAY: "0.15"
+      WEEKLY_QUOTES_TIMEOUT: "30"
       WEEKLY_MIN_EPS_POINTS: "8"
       WEEKLY_LOOKBACK_YEARS: "10"
       WEEKLY_MARKET_CAP_MIN_COVERAGE: "0.8"

@@ -177,6 +177,12 @@ Outputs:
 - Free-data DB: `data/free_data.db`
 - Tracker comments/status updates in `data/internal_jira.db`
 
+Optional: refresh latest closes with fewer HTTP requests (bulk quotes):
+
+```bash
+python3 scripts/fetch_stooq_quotes.py --data-db data/free_data.db
+```
+
 Run from Docker container:
 
 ```bash

@@ -1,0 +1,116 @@
+{% extends "base.html" %}
+{% block content %}
+<section class="issue-header">
+  <div>
+    <h1>Data Gaps (Latest Snapshot)</h1>
+    <div class="meta-row">Identify constituents missing prices / facts / valid CAPE in the latest run.</div>
+  </div>
+</section>
+
+{% if error %}
+  <section class="panel">
+    <p class="muted">{{ error }}</p>
+  </section>
+{% else %}
+  <section class="panel">
+    <div class="toolbar" style="margin: 0;">
+      <div>
+        <div><strong>Constituents as-of:</strong> {{ as_of_constituents_date }}</div>
+        {% if latest_run %}
+          <div class="muted">Latest run: {{ latest_run.run_id }} at {{ latest_run.run_at }} (price date {{ latest_run.latest_price_date }})</div>
+        {% else %}
+          <div class="muted">No CC CAPE runs found yet.</div>
+        {% endif %}
+      </div>
+      <div class="inline-form">
+        <a class="btn btn-secondary" href="/metrics/health">View health</a>
+        <a class="btn btn-secondary" href="/metrics/cc-cape">View metrics</a>
+      </div>
+    </div>
+  </section>
+
+  <section class="issue-layout" style="margin-top: 1rem;">
+    <article class="panel">
+      <h2>Summary</h2>
+      <p><strong>Total constituents:</strong> {{ summary.total }}</p>
+      <p><strong>With any price:</strong> {{ summary.with_price }} / {{ summary.total }}</p>
+      <p><strong>With any facts (CIK fetched):</strong> {{ summary.with_facts }} / {{ summary.total }}</p>
+      {% if latest_run %}
+        <p><strong>Included in latest CC CAPE run:</strong> {{ summary.included_in_latest_run }} / {{ summary.total }}</p>
+      {% endif %}
+      <div class="muted" style="margin-top: 0.5rem;">
+        Tip: If Stooq daily-history refresh is rate-limited, try bulk quotes:
+        <code>python3 scripts/fetch_stooq_quotes.py</code>
+      </div>
+    </article>
+
+    <article class="panel">
+      <h2>Breakdown</h2>
+      <table class="table">
+        <thead>
+          <tr>
+            <th>Bucket</th>
+            <th>Count</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for b in breakdown %}
+          <tr>
+            <td><code>{{ b.bucket }}</code></td>
+            <td>{{ b.count }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </article>
+  </section>
+
+  <section class="panel" style="margin-top: 1rem;">
+    <h2>Constituents</h2>
+    <div class="muted">Showing {{ rows|length }} rows.</div>
+    <div style="overflow-x: auto; margin-top: 0.75rem;">
+      <table class="table">
+        <thead>
+          <tr>
+            <th>Symbol</th>
+            <th>Security</th>
+            <th>Sector</th>
+            <th>CIK</th>
+            <th>Latest Price</th>
+            <th>Price Age (d)</th>
+            <th>Facts Fetched</th>
+            <th>Facts Age (d)</th>
+            {% if latest_run %}
+              <th>In Latest Run</th>
+              <th>Gap Bucket</th>
+            {% else %}
+              <th>Gap Bucket</th>
+            {% endif %}
+          </tr>
+        </thead>
+        <tbody>
+          {% for r in rows %}
+          <tr>
+            <td><code>{{ r.symbol }}</code></td>
+            <td>{{ r.security if r.security else "-" }}</td>
+            <td>{{ r.gics_sector if r.gics_sector else "-" }}</td>
+            <td>{{ r.cik if r.cik else "-" }}</td>
+            <td>{{ r.latest_price_date if r.latest_price_date else "-" }}</td>
+            <td>{{ r.price_age_days if r.price_age_days is not none else "-" }}</td>
+            <td>{{ r.facts_fetched_at if r.facts_fetched_at else "-" }}</td>
+            <td>{{ r.facts_age_days if r.facts_age_days is not none else "-" }}</td>
+            {% if latest_run %}
+              <td>{{ "yes" if r.in_latest_run else "no" }}</td>
+              <td><code>{{ r.bucket }}</code></td>
+            {% else %}
+              <td><code>{{ r.bucket }}</code></td>
+            {% endif %}
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+{% endif %}
+{% endblock %}
+

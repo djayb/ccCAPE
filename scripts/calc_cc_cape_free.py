@@ -277,6 +277,19 @@ def latest_price(conn: sqlite3.Connection, symbol: str) -> sqlite3.Row | None:
 
 
 def resolve_cik(conn: sqlite3.Connection, symbol: str, cik_hint: str | None) -> str | None:
+    override_row = None
+    try:
+        override_row = conn.execute(
+            "SELECT cik FROM symbol_overrides WHERE symbol = ?",
+            (normalize_symbol(symbol),),
+        ).fetchone()
+    except sqlite3.Error:
+        override_row = None
+    if override_row and override_row["cik"]:
+        normalized = normalize_cik(override_row["cik"])
+        if normalized:
+            return normalized
+
     if cik_hint:
         normalized = normalize_cik(cik_hint)
         if normalized:

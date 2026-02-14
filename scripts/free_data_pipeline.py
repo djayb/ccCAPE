@@ -145,6 +145,14 @@ CREATE TABLE IF NOT EXISTS pipeline_kv (
     value TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS symbol_overrides (
+    symbol TEXT PRIMARY KEY,
+    cik TEXT,
+    stooq_symbol TEXT,
+    notes TEXT,
+    updated_at TEXT NOT NULL
+);
 """
 
 
@@ -410,7 +418,39 @@ def load_latest_constituents(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     ).fetchall()
 
 
-def resolve_cik_for_symbol(conn: sqlite3.Connection, symbol: str, wiki_cik: str) -> str | None:
+def load_symbol_overrides(conn: sqlite3.Connection) -> dict[str, dict[str, str]]:
+    try:
+        exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name = 'symbol_overrides' LIMIT 1"
+        ).fetchone()
+    except sqlite3.Error:
+        exists = None
+    if not exists:
+        return {}
+    rows = conn.execute("SELECT symbol, cik, stooq_symbol FROM symbol_overrides").fetchall()
+    overrides: dict[str, dict[str, str]] = {}
+    for row in rows:
+        sym = normalize_symbol(row["symbol"])
+        if not sym:
+            continue
+        overrides[sym] = {
+            "cik": normalize_cik(row["cik"]) or "",
+            "stooq_symbol": (row["stooq_symbol"] or "").strip(),
+        }
+    return overrides
+
+
+def resolve_cik_for_symbol(
+    conn: sqlite3.Connection,
+    symbol: str,
+    wiki_cik: str,
+    overrides: dict[str, dict[str, str]] | None = None,
+) -> str | None:
+    if overrides:
+        override = overrides.get(normalize_symbol(symbol), {})
+        if override.get("cik"):
+            return normalize_cik(override.get("cik"))
+
     if wiki_cik:
         return normalize_cik(wiki_cik)
 
@@ -551,9 +591,11 @@ def fetch_symbol_prices_stooq(
     session: requests.Session,
     *,
     symbol: str,
+    request_symbol: str | None = None,
     max_rows: int | None,
 ) -> tuple[int, str | None, bool]:
-    for variant in stooq_symbol_variants(symbol):
+    request_base = request_symbol if request_symbol else symbol
+    for variant in stooq_symbol_variants(request_base):
         url = STOOQ_DAILY_URL_TMPL.format(symbol=variant)
         response = session.get(url, timeout=45)
         if response.status_code == 429:
@@ -633,6 +675,7 @@ def fetch_prices_stooq(
     request_delay: float,
     missing_only: bool = False,
 ) -> dict[str, Any]:
+    overrides = load_symbol_overrides(conn)
     cursor_before = kv_get(conn, "stooq_prices_cursor")
     existing = {
         normalize_symbol(row["symbol"])
@@ -666,9 +709,14 @@ def fetch_prices_stooq(
     last_nonlimited_symbol: str | None = None
 
     for idx, symbol in enumerate(selected_symbols, start=1):
+        override = overrides.get(normalize_symbol(symbol), {}) if overrides else {}
+        request_symbol = (override.get("stooq_symbol") or "").strip() if isinstance(override, dict) else ""
+        if request_symbol.lower().endswith(".us"):
+            request_symbol = request_symbol[:-3]
         count, body, limited = fetch_symbol_prices_stooq(
             session,
             symbol=symbol,
+            request_symbol=request_symbol or None,
             max_rows=max_rows_per_symbol if max_rows_per_symbol > 0 else None,
         )
         if limited:
@@ -746,10 +794,11 @@ def fetch_company_facts(
     stale_days: int,
     missing_only: bool = False,
 ) -> dict[str, Any]:
+    overrides = load_symbol_overrides(conn)
     target = []
     missing_cik = []
     for row in constituents:
-        cik_value = resolve_cik_for_symbol(conn, row["symbol"], row["cik"])
+        cik_value = resolve_cik_for_symbol(conn, row["symbol"], row["cik"], overrides)
         if cik_value is None:
             missing_cik.append(row["symbol"])
             continue
@@ -935,7 +984,10 @@ def fetch_company_facts(
 def run_quality_checks(conn: sqlite3.Connection) -> dict[str, Any]:
     latest_constituents = load_latest_constituents(conn)
     total_constituents = len(latest_constituents)
-    missing_cik = sum(1 for row in latest_constituents if not resolve_cik_for_symbol(conn, row["symbol"], row["cik"]))
+    overrides = load_symbol_overrides(conn)
+    missing_cik = sum(
+        1 for row in latest_constituents if not resolve_cik_for_symbol(conn, row["symbol"], row["cik"], overrides)
+    )
 
     latest_price_count = conn.execute(
         """

@@ -37,6 +37,7 @@ from scripts._fundamentals_import import (  # noqa: E402
     connect_data_db,
     delete_existing_taxonomy_tags,
     load_latest_constituents_symbol_to_cik,
+    load_symbol_overrides,
     load_sec_ticker_map_symbol_to_cik,
     normalize_symbol,
     parse_date,
@@ -155,6 +156,7 @@ def import_simfin_income_annual(args: argparse.Namespace) -> dict[str, Any]:
         universe_symbols = build_universe(conn, as_of_date=args.as_of_constituents_date, universe=args.universe)
         symbol_to_cik = load_latest_constituents_symbol_to_cik(conn, args.as_of_constituents_date)
         sec_map = load_sec_ticker_map_symbol_to_cik(conn)
+        overrides = load_symbol_overrides(conn)
 
         if args.replace_existing:
             summary["deleted_existing"] = delete_existing_taxonomy_tags(
@@ -185,7 +187,7 @@ def import_simfin_income_annual(args: argparse.Namespace) -> dict[str, Any]:
                 continue
             summary["rows_matched_universe"] += 1
 
-            cik = resolve_cik(symbol_to_cik, sec_map, symbol=symbol, cik_hint=None)
+            cik = resolve_cik(symbol_to_cik, sec_map, symbol=symbol, cik_hint=None, overrides=overrides)
             if not cik:
                 summary["rows_skipped_missing_id"] += 1
                 continue
@@ -292,4 +294,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

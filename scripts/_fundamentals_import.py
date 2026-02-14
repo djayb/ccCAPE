@@ -34,6 +34,37 @@ def table_exists(conn: sqlite3.Connection, name: str) -> bool:
     return bool(row)
 
 
+def ensure_symbol_overrides_schema(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS symbol_overrides (
+            symbol TEXT PRIMARY KEY,
+            cik TEXT,
+            stooq_symbol TEXT,
+            notes TEXT,
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.commit()
+
+
+def load_symbol_overrides(conn: sqlite3.Connection) -> dict[str, dict[str, str]]:
+    if not table_exists(conn, "symbol_overrides"):
+        return {}
+    rows = conn.execute("SELECT symbol, cik, stooq_symbol FROM symbol_overrides").fetchall()
+    overrides: dict[str, dict[str, str]] = {}
+    for r in rows:
+        sym = normalize_symbol(r["symbol"])
+        if not sym:
+            continue
+        overrides[sym] = {
+            "cik": normalize_cik(r["cik"]) or "",
+            "stooq_symbol": (r["stooq_symbol"] or "").strip(),
+        }
+    return overrides
+
+
 def normalize_symbol(symbol: str) -> str:
     return (symbol or "").strip().upper()
 
@@ -128,10 +159,16 @@ def resolve_cik(
     *,
     symbol: str | None,
     cik_hint: str | int | None,
+    overrides: dict[str, dict[str, str]] | None = None,
 ) -> str | None:
     normalized = normalize_cik(cik_hint)
     if normalized:
         return normalized
+    if overrides and symbol:
+        override = overrides.get(normalize_symbol(symbol), {})
+        normalized = normalize_cik(override.get("cik"))
+        if normalized:
+            return normalized
     if symbol:
         for candidate in symbol_candidates(symbol):
             cik = symbol_to_cik.get(candidate) or sec_map_symbol_to_cik.get(candidate)
@@ -205,4 +242,3 @@ def delete_existing_taxonomy_tags(conn: sqlite3.Connection, *, taxonomy: str, ta
         (taxonomy, *tags),
     )
     return int(cursor.rowcount or 0)
-

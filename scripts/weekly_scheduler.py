@@ -62,6 +62,8 @@ def run_job(args: argparse.Namespace) -> tuple[int, int]:
         args.tracker_db,
         "--facts-limit",
         str(args.facts_limit),
+        "--facts-stale-days",
+        str(args.facts_stale_days),
         "--prices-symbol-limit",
         str(args.prices_symbol_limit),
         "--prices-rows-per-symbol",
@@ -69,6 +71,10 @@ def run_job(args: argparse.Namespace) -> tuple[int, int]:
         "--request-delay",
         str(args.request_delay),
     ]
+    if args.facts_missing_only:
+        pipeline_cmd.append("--facts-missing-only")
+    if args.prices_missing_only:
+        pipeline_cmd.append("--prices-missing-only")
     calc_cmd = [
         sys.executable,
         str(ROOT_DIR / "scripts" / "calc_cc_cape_free.py"),
@@ -171,8 +177,21 @@ def main() -> int:
     parser.add_argument("--hour", type=int, default=int(os.getenv("WEEKLY_RUN_HOUR", "9")))
     parser.add_argument("--minute", type=int, default=int(os.getenv("WEEKLY_RUN_MINUTE", "0")))
     parser.add_argument("--facts-limit", type=int, default=int(os.getenv("WEEKLY_FACTS_LIMIT", "200")))
+    parser.add_argument("--facts-stale-days", type=int, default=int(os.getenv("WEEKLY_FACTS_STALE_DAYS", "30")))
+    parser.add_argument(
+        "--facts-missing-only",
+        action=argparse.BooleanOptionalAction,
+        default=(os.getenv("WEEKLY_FACTS_MISSING_ONLY", "false").lower() in {"1", "true", "yes"}),
+        help="Only fetch company facts missing from the DB (useful for incremental backfills).",
+    )
     parser.add_argument("--prices-symbol-limit", type=int, default=int(os.getenv("WEEKLY_PRICES_SYMBOL_LIMIT", "503")))
     parser.add_argument("--prices-rows-per-symbol", type=int, default=int(os.getenv("WEEKLY_PRICES_ROWS_PER_SYMBOL", "3650")))
+    parser.add_argument(
+        "--prices-missing-only",
+        action=argparse.BooleanOptionalAction,
+        default=(os.getenv("WEEKLY_PRICES_MISSING_ONLY", "false").lower() in {"1", "true", "yes"}),
+        help="Only fetch prices for symbols missing from the DB (useful for filling gaps quickly).",
+    )
     parser.add_argument("--request-delay", type=float, default=float(os.getenv("WEEKLY_REQUEST_DELAY", "0.25")))
     parser.add_argument("--calc-max-symbols", type=int, default=int(os.getenv("WEEKLY_CALC_MAX_SYMBOLS", "0")))
     parser.add_argument("--min-eps-points", type=int, default=int(os.getenv("WEEKLY_MIN_EPS_POINTS", "8")))

@@ -631,6 +631,7 @@ def fetch_prices_stooq(
     symbol_limit: int,
     max_rows_per_symbol: int,
     request_delay: float,
+    missing_only: bool = False,
 ) -> dict[str, Any]:
     cursor_before = kv_get(conn, "stooq_prices_cursor")
     existing = {
@@ -650,7 +651,7 @@ def fetch_prices_stooq(
 
     missing_symbols = [sym for sym in normalized_symbols if sym not in existing]
     existing_symbols = [sym for sym in normalized_symbols if sym in existing]
-    ordered_symbols = missing_symbols + existing_symbols
+    ordered_symbols = missing_symbols if missing_only else (missing_symbols + existing_symbols)
 
     if cursor_before and cursor_before in ordered_symbols:
         start_idx = ordered_symbols.index(cursor_before) + 1
@@ -743,6 +744,7 @@ def fetch_company_facts(
     request_delay: float,
     selected_tags: tuple[str, ...],
     stale_days: int,
+    missing_only: bool = False,
 ) -> dict[str, Any]:
     target = []
     missing_cik = []
@@ -791,7 +793,27 @@ def fetch_company_facts(
 
     stale_in_db.sort(key=lambda item: item[2])
     fresh_in_db.sort(key=lambda item: item[2])
-    prioritized = missing_in_db + [(s, c) for (s, c, _) in stale_in_db] + [(s, c) for (s, c, _) in fresh_in_db]
+    prioritized = missing_in_db if missing_only else (
+        missing_in_db + [(s, c) for (s, c, _) in stale_in_db] + [(s, c) for (s, c, _) in fresh_in_db]
+    )
+
+    # Deduplicate by normalized CIK to avoid repeated requests for the same entity.
+    prioritized_dedup: list[tuple[str, str]] = []
+    seen_cik: set[str] = set()
+    for symbol, cik_value in prioritized:
+        cik_norm = normalize_cik(cik_value) or ""
+        if not cik_norm or cik_norm in seen_cik:
+            continue
+        seen_cik.add(cik_norm)
+        prioritized_dedup.append((symbol, cik_norm))
+    prioritized = prioritized_dedup
+
+    cursor_before = kv_get(conn, "sec_company_facts_cursor")
+    ordered_ciks = [cik for (_sym, cik) in prioritized]
+    if cursor_before and cursor_before in ordered_ciks:
+        start_idx = ordered_ciks.index(cursor_before) + 1
+        prioritized = prioritized[start_idx:] + prioritized[:start_idx]
+    rotation_start = prioritized[0][1] if prioritized else None
 
     if cik_limit > 0:
         prioritized = prioritized[:cik_limit]
@@ -801,13 +823,21 @@ def fetch_company_facts(
     fetched = 0
     failed = []
     observations_written = 0
+    rate_limited = False
+    rate_limit_cik: str | None = None
+    last_nonlimited_cik: str | None = None
 
     for idx, (symbol, cik_value) in enumerate(prioritized, start=1):
         url = SEC_COMPANY_FACTS_URL_TMPL.format(cik=cik10(cik_value))
         response = session.get(url, timeout=45)
+        if response.status_code == 429:
+            rate_limited = True
+            rate_limit_cik = cik_value
+            break
         if response.status_code != 200:
             failed.append({"symbol": symbol, "cik": cik_value, "http_status": response.status_code})
-            if request_delay > 0 and idx < len(target):
+            last_nonlimited_cik = cik_value
+            if request_delay > 0 and idx < len(prioritized):
                 time.sleep(request_delay)
             continue
         payload = response.json()
@@ -867,13 +897,22 @@ def fetch_company_facts(
             )
             observations_written += 1
         fetched += 1
+        last_nonlimited_cik = cik_value
 
-        if request_delay > 0 and idx < len(target):
+        if request_delay > 0 and idx < len(prioritized):
             time.sleep(request_delay)
 
     conn.commit()
+    cursor_after = cursor_before
+    if last_nonlimited_cik:
+        kv_set(conn, "sec_company_facts_cursor", last_nonlimited_cik)
+        cursor_after = last_nonlimited_cik
     return {
-        "status": "success",
+        "status": "rate_limited" if rate_limited else "success",
+        "cursor_before": cursor_before,
+        "cursor_after": cursor_after,
+        "rotation_start": rotation_start,
+        "facts_missing_only": bool(missing_only),
         "constituents_total": len(constituents),
         "cik_resolved": len(target),
         "missing_cik": len(missing_cik),
@@ -889,6 +928,7 @@ def fetch_company_facts(
         "observations_written": observations_written,
         "selected_tags": list(selected_tags),
         "stale_days": stale_days,
+        "rate_limit_cik": rate_limit_cik,
     }
 
 
@@ -1279,6 +1319,7 @@ def run_pipeline(args: argparse.Namespace) -> int:
                     request_delay=args.request_delay,
                     selected_tags=tuple(args.sec_tags),
                     stale_days=args.facts_stale_days,
+                    missing_only=args.facts_missing_only,
                 ),
             )
 
@@ -1301,6 +1342,7 @@ def run_pipeline(args: argparse.Namespace) -> int:
                     symbol_limit=args.prices_symbol_limit,
                     max_rows_per_symbol=args.prices_rows_per_symbol,
                     request_delay=args.request_delay,
+                    missing_only=args.prices_missing_only,
                 ),
             )
         run_step("quality_checks", lambda: run_quality_checks(conn))
@@ -1373,12 +1415,24 @@ def build_parser() -> argparse.ArgumentParser:
         default=30,
         help="Refetch company facts if last fetched more than N days ago (0 disables staleness refresh).",
     )
+    parser.add_argument(
+        "--facts-missing-only",
+        action="store_true",
+        default=False,
+        help="Only fetch company facts missing from the DB (ignores stale refresh).",
+    )
     parser.add_argument("--prices-symbol-limit", type=int, default=100, help="Max number of symbols for price fetch.")
     parser.add_argument(
         "--prices-rows-per-symbol",
         type=int,
         default=3650,
         help="Max daily rows per symbol written from Stooq CSV.",
+    )
+    parser.add_argument(
+        "--prices-missing-only",
+        action="store_true",
+        default=False,
+        help="Only fetch prices for symbols missing from the DB.",
     )
     parser.add_argument("--request-delay", type=float, default=0.2, help="Delay between remote requests in seconds.")
     parser.add_argument(

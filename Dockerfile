@@ -21,6 +21,7 @@ RUN chmod +x /app/internal_jira.py \
     /app/scripts/import_external_fundamentals_csv.py \
     /app/scripts/import_simfin_bulk.py \
     /app/scripts/manage_symbol_overrides.py \
+    /app/scripts/generate_qa_report.py \
     /app/scripts/generate_kpi_report.py \
     /app/scripts/weekly_scheduler.py
 

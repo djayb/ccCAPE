@@ -485,6 +485,19 @@ def metrics_health(request: Request):
         except OSError:
             kpi_report = None
 
+    qa_report = None
+    qa_path = DOCS_DIR / "QA_REPORT.md"
+    if qa_path.exists():
+        try:
+            stat = qa_path.stat()
+            qa_report = {
+                "relpath": qa_path.name,
+                "size_kb": f"{int(stat.st_size / 1024)}",
+                "mtime": dt.datetime.fromtimestamp(stat.st_mtime).strftime("%Y-%m-%d %H:%M"),
+            }
+        except OSError:
+            qa_report = None
+
     return templates.TemplateResponse(
         "metrics_health.html",
         {
@@ -493,6 +506,7 @@ def metrics_health(request: Request):
             "pipeline": pipeline_obj,
             "calc": calc_obj,
             "series": series_obj,
+            "qa_report": qa_report,
             "kpi_report": kpi_report,
             "message": request.query_params.get("msg", ""),
             "error": request.query_params.get("error", ""),

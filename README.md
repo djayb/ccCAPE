@@ -292,6 +292,14 @@ python3 scripts/generate_kpi_report.py --out docs/KPI_BASELINE.md --update-track
 
 This is also run by the weekly scheduler by default (`WEEKLY_KPI_ENABLED=true`).
 
+## 13b. QA Report (Data Quality)
+
+Generate a data-quality report focused on coverage gaps and earliest usable history:
+
+```bash
+python3 scripts/generate_qa_report.py --out docs/QA_REPORT.md --update-tracker
+```
+
 ## 14. Extend Fundamentals History (Optional)
 
 If you have a fundamentals dataset beyond SEC XBRL coverage (licensed or internal), you can import it into

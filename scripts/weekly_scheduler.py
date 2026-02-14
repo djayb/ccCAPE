@@ -153,6 +153,28 @@ def run_job(args: argparse.Namespace) -> tuple[int, int]:
         if series_code != 0:
             log("Monthly series backfill failed (non-zero exit); continuing.")
 
+    qa_code = 0
+    if args.qa_enabled:
+        qa_cmd = [
+            sys.executable,
+            str(ROOT_DIR / "scripts" / "generate_qa_report.py"),
+            "--tracker-db",
+            args.tracker_db,
+            "--data-db",
+            args.data_db,
+            "--out",
+            args.qa_markdown_path,
+            "--series-coverage-threshold",
+            str(args.qa_series_coverage_threshold),
+        ]
+        if args.update_tracker:
+            qa_cmd.append("--update-tracker")
+        else:
+            qa_cmd.append("--no-update-tracker")
+        qa_code = run_command(qa_cmd)
+        if qa_code != 0:
+            log("QA report generation failed (non-zero exit); continuing.")
+
     kpi_code = 0
     if args.kpi_enabled:
         kpi_cmd = [
@@ -248,6 +270,19 @@ def main() -> int:
     )
     parser.add_argument("--kpi-days", type=int, default=int(os.getenv("WEEKLY_KPI_DAYS", "30")))
     parser.add_argument("--kpi-markdown-path", default=os.getenv("WEEKLY_KPI_MARKDOWN_PATH", "docs/KPI_BASELINE.md"))
+    parser.add_argument(
+        "--qa-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=(os.getenv("WEEKLY_QA_ENABLED", "true").lower() in {"1", "true", "yes"}),
+        help="Generate QA (data quality) markdown report after each run.",
+    )
+    parser.add_argument("--qa-markdown-path", default=os.getenv("WEEKLY_QA_MARKDOWN_PATH", "docs/QA_REPORT.md"))
+    parser.add_argument(
+        "--qa-series-coverage-threshold",
+        type=float,
+        default=float(os.getenv("WEEKLY_QA_SERIES_COVERAGE_THRESHOLD", "0.7")),
+        help="Earliest usable series month uses (valid/total) >= threshold.",
+    )
     parser.add_argument(
         "--update-tracker",
         action=argparse.BooleanOptionalAction,

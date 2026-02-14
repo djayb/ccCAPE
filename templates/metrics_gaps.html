@@ -49,7 +49,7 @@
       <table class="table">
         <thead>
           <tr>
-            <th>Bucket</th>
+            <th>Reason</th>
             <th>Count</th>
           </tr>
         </thead>
@@ -78,16 +78,16 @@
             <th>CIK</th>
             <th>Latest Price</th>
             <th>Price Age (d)</th>
-            <th>Facts Fetched</th>
-            <th>Facts Age (d)</th>
-            {% if latest_run %}
-              <th>In Latest Run</th>
-              <th>Gap Bucket</th>
-            {% else %}
-              <th>Gap Bucket</th>
-            {% endif %}
-          </tr>
-        </thead>
+              <th>Facts Fetched</th>
+              <th>Facts Age (d)</th>
+              {% if latest_run %}
+                <th>In Latest Run</th>
+                <th>Reason</th>
+              {% else %}
+              <th>Reason</th>
+              {% endif %}
+            </tr>
+          </thead>
         <tbody>
           {% for r in rows %}
           <tr>
@@ -113,4 +113,3 @@
   </section>
 {% endif %}
 {% endblock %}
-

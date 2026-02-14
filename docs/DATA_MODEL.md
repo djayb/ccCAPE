@@ -87,6 +87,13 @@ Purpose: raw ingested datasets + curated computed metrics.
     - `company_cape`, `avg_real_eps`, `eps_points`, `weight`
     - `market_cap` (proxy) and sector fields
 
+- `cc_cape_constituent_exclusions`
+  - Per-run list of constituents that were excluded from the calculation (and why)
+  - Key: `(run_id, symbol)`
+  - Includes:
+    - `reason` (e.g. `no_price`, `no_eps_candidates`, `insufficient_eps_points`)
+    - `details_json` for debugging/QA
+
 - `cc_cape_series_monthly`
   - Monthly time series for “current constituents” backfill
   - Key: `(as_of_constituents_date, observation_date, lookback_years, min_eps_points, market_cap_min_coverage_permille)`

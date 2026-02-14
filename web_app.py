@@ -587,7 +587,16 @@ def metrics_gaps(request: Request):
             ).fetchall()
             included_symbols = {r["symbol"] for r in rows if r and r["symbol"]}
 
+        exclusion_reason_by_symbol: dict[str, str] = {}
+        if latest_run_row and _table_exists(free_conn, "cc_cape_constituent_exclusions"):
+            rows = free_conn.execute(
+                "SELECT symbol, reason FROM cc_cape_constituent_exclusions WHERE run_id = ?",
+                (latest_run_row["run_id"],),
+            ).fetchall()
+            exclusion_reason_by_symbol = {r["symbol"]: r["reason"] for r in rows if r and r["symbol"] and r["reason"]}
+
     latest_run = dict(latest_run_row) if latest_run_row else None
+    exclusion_reason_by_symbol = exclusion_reason_by_symbol if latest_run_row else {}
 
     rows_out: list[dict[str, Any]] = []
     with_price = 0
@@ -609,8 +618,12 @@ def metrics_gaps(request: Request):
         if in_latest_run:
             included_in_latest += 1
 
+        calc_reason = exclusion_reason_by_symbol.get(symbol) if latest_run else None
+
         if in_latest_run:
             bucket = "included"
+        elif calc_reason:
+            bucket = calc_reason
         elif not latest_price_date:
             bucket = "missing_price"
         elif not cik:
@@ -635,6 +648,7 @@ def metrics_gaps(request: Request):
                 "facts_fetched_at": facts_fetched_at,
                 "facts_age_days": age_days_ts(facts_fetched_at),
                 "in_latest_run": in_latest_run,
+                "calc_reason": calc_reason,
                 "bucket": bucket,
             }
         )

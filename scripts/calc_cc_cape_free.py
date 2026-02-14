@@ -76,6 +76,16 @@ CREATE TABLE IF NOT EXISTS cc_cape_constituent_metrics (
     PRIMARY KEY (run_id, symbol),
     FOREIGN KEY (run_id) REFERENCES cc_cape_runs(run_id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS cc_cape_constituent_exclusions (
+    run_id INTEGER NOT NULL,
+    symbol TEXT NOT NULL,
+    cik TEXT,
+    reason TEXT NOT NULL,
+    details_json TEXT,
+    PRIMARY KEY (run_id, symbol),
+    FOREIGN KEY (run_id) REFERENCES cc_cape_runs(run_id) ON DELETE CASCADE
+);
 """
 
 EPS_TAGS = ("EarningsPerShareBasic", "EarningsPerShareDiluted")
@@ -491,25 +501,25 @@ def compute_company_metrics(
     symbol: str,
     cik: str,
     gics_sector: str | None,
+    price_row: sqlite3.Row | None,
     latest_cpi: float,
     cpi_dates: list[dt.date],
     cpi_values: list[float],
     min_eps_points: int,
     lookback_years: int,
-) -> dict[str, Any] | None:
-    price_row = latest_price(conn, symbol)
+) -> tuple[dict[str, Any] | None, str | None, dict[str, Any]]:
     if not price_row:
-        return None
+        return None, "no_price", {}
     price_date = parse_date(price_row["price_date"])
     if price_date is None:
-        return None
+        return None, "bad_price_date", {"price_date_raw": price_row["price_date"]}
     close_price = float(price_row["close_price"])
     if close_price <= 0:
-        return None
+        return None, "nonpositive_price", {"close_price": close_price}
 
     candidates = eps_candidates(conn, cik)
     if not candidates:
-        return None
+        return None, "no_eps_candidates", {}
 
     cutoff_date = price_date - dt.timedelta(days=365 * lookback_years + 3)
 
@@ -546,32 +556,36 @@ def compute_company_metrics(
             best_points = len(real_eps_values)
 
     if best_points < min_eps_points:
-        return None
+        return None, "insufficient_eps_points", {"best_points": best_points, "min_eps_points": min_eps_points}
 
     avg_real_eps = statistics.mean(best_real_eps_values)
     if not math.isfinite(avg_real_eps) or avg_real_eps <= 0:
-        return None
+        return None, "nonpositive_avg_real_eps", {"avg_real_eps": avg_real_eps}
 
     company_cape = close_price / avg_real_eps
     if not math.isfinite(company_cape) or company_cape <= 0:
-        return None
+        return None, "invalid_company_cape", {"company_cape": company_cape}
 
     shares = latest_shares_outstanding(conn, cik)
     market_cap = close_price * shares if shares else None
 
-    return {
-        "symbol": normalize_symbol(symbol),
-        "cik": cik,
-        "gics_sector": gics_sector or "",
-        "price_date": price_row["price_date"],
-        "close_price": close_price,
-        "shares_outstanding": shares,
-        "market_cap": market_cap,
-        "eps_tag": best_tag,
-        "eps_points": best_points,
-        "avg_real_eps": avg_real_eps,
-        "company_cape": company_cape,
-    }
+    return (
+        {
+            "symbol": normalize_symbol(symbol),
+            "cik": cik,
+            "gics_sector": gics_sector or "",
+            "price_date": price_row["price_date"],
+            "close_price": close_price,
+            "shares_outstanding": shares,
+            "market_cap": market_cap,
+            "eps_tag": best_tag,
+            "eps_points": best_points,
+            "avg_real_eps": avg_real_eps,
+            "company_cape": company_cape,
+        },
+        None,
+        {},
+    )
 
 
 def assign_weights(metrics: list[dict[str, Any]], market_cap_min_coverage: float) -> tuple[list[dict[str, Any]], str, float]:
@@ -606,6 +620,7 @@ def persist_run(
     symbols_total: int,
     symbols_with_price: int,
     metrics: list[dict[str, Any]],
+    exclusions: list[dict[str, Any]],
     min_eps_points: int,
     lookback_years: int,
     weighting_method: str,
@@ -678,6 +693,31 @@ def persist_run(
                 metric["avg_real_eps"],
                 metric["company_cape"],
                 metric["weight"],
+            ),
+        )
+
+    for exc in exclusions:
+        symbol = exc.get("symbol")
+        reason = exc.get("reason")
+        if not symbol or not reason:
+            continue
+        conn.execute(
+            """
+            INSERT INTO cc_cape_constituent_exclusions
+            (run_id, symbol, cik, reason, details_json)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(run_id, symbol)
+            DO UPDATE SET
+                cik = excluded.cik,
+                reason = excluded.reason,
+                details_json = excluded.details_json
+            """,
+            (
+                run_id,
+                str(symbol),
+                exc.get("cik"),
+                str(reason),
+                json.dumps(exc.get("details") or {}, sort_keys=True),
             ),
         )
 
@@ -938,6 +978,7 @@ def run_calculation(args: argparse.Namespace) -> dict[str, Any]:
             raise RuntimeError("No CPI series loaded.")
 
         metrics: list[dict[str, Any]] = []
+        exclusions: list[dict[str, Any]] = []
         symbols_with_price = 0
         skipped_missing_cik = 0
         skipped_invalid = 0
@@ -947,14 +988,26 @@ def run_calculation(args: argparse.Namespace) -> dict[str, Any]:
             cik = resolve_cik(conn, symbol, row["cik"])
             if cik is None:
                 skipped_missing_cik += 1
+                exclusions.append(
+                    {
+                        "symbol": normalize_symbol(symbol),
+                        "cik": None,
+                        "reason": "missing_cik",
+                        "details": {"cik_hint": row["cik"]},
+                    }
+                )
                 continue
-            if latest_price(conn, symbol):
+
+            price_row = latest_price(conn, symbol)
+            if price_row:
                 symbols_with_price += 1
-            metric = compute_company_metrics(
+
+            metric, reason, details = compute_company_metrics(
                 conn,
                 symbol=symbol,
                 cik=cik,
                 gics_sector=row["gics_sector"],
+                price_row=price_row,
                 latest_cpi=latest_cpi,
                 cpi_dates=cpi_dates,
                 cpi_values=cpi_values,
@@ -963,6 +1016,14 @@ def run_calculation(args: argparse.Namespace) -> dict[str, Any]:
             )
             if metric is None:
                 skipped_invalid += 1
+                exclusions.append(
+                    {
+                        "symbol": normalize_symbol(symbol),
+                        "cik": cik,
+                        "reason": reason or "unknown",
+                        "details": details or {},
+                    }
+                )
                 continue
             metrics.append(metric)
 
@@ -985,6 +1046,13 @@ def run_calculation(args: argparse.Namespace) -> dict[str, Any]:
             "skipped_invalid_metrics": skipped_invalid,
             "symbols_requested": len(constituents),
         }
+        # Add exclusion breakdown for debugging/QA.
+        if exclusions:
+            reason_counts: dict[str, int] = {}
+            for item in exclusions:
+                r = str(item.get("reason") or "unknown")
+                reason_counts[r] = reason_counts.get(r, 0) + 1
+            notes["exclusion_reason_counts"] = reason_counts
 
         shiller_cape = args.shiller_cape
         shiller_cape_date: str | None = None
@@ -1009,6 +1077,7 @@ def run_calculation(args: argparse.Namespace) -> dict[str, Any]:
             symbols_total=len(constituents),
             symbols_with_price=symbols_with_price,
             metrics=metrics,
+            exclusions=exclusions,
             min_eps_points=args.min_eps_points,
             lookback_years=args.lookback_years,
             weighting_method=weighting_method,

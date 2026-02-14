@@ -47,6 +47,20 @@ python3 scripts/calc_cc_cape_free.py --update-tracker
 python3 scripts/backfill_cc_cape_series_free.py --series-years 10 --update-tracker
 ```
 
+### Import External Fundamentals (Optional)
+
+If you have a fundamentals dataset that extends beyond SEC XBRL coverage, you can import it:
+
+```bash
+python3 scripts/import_external_fundamentals_csv.py \
+  --csv data/external_fundamentals.csv \
+  --taxonomy external
+```
+
+See details and SimFin adapter notes:
+
+- `docs/EXTERNAL_FUNDAMENTALS.md`
+
 ## Health Checks
 
 Use the Ops page:

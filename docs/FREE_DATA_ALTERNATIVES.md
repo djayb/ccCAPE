@@ -31,6 +31,12 @@ Build CC CAPE without paid market data subscriptions, understanding accuracy and
 - Alpha Vantage free tier works for prototyping but request limits are low for full S&P 500 daily processing.
 - Nasdaq Data Link has free and premium feeds; free feed coverage/quality differs by dataset.
 
+Optional extension for fundamentals history:
+
+- If you have an internal or licensed fundamentals dataset, you can import it into `company_facts_values`
+  (distinguished via `taxonomy`) to extend CC CAPE history beyond SEC XBRL coverage.
+- See: `docs/EXTERNAL_FUNDAMENTALS.md`
+
 ## Hard Constraint for True CC CAPE
 
 CC CAPE needs:

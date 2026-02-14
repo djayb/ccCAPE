@@ -70,6 +70,21 @@
 </section>
 
 <section class="panel" style="margin-top: 1rem;">
+  <h2>Coverage Over Time</h2>
+  <div class="muted">From monthly series (<code>cc_cape_series_monthly</code>).</div>
+  <div class="muted" style="margin-top: 0.35rem;">
+    <span style="color:#0b6bcb; font-weight:700;">Priced %</span>
+    and
+    <span style="color:#067647; font-weight:700;">Valid CAPE %</span>
+    of total constituents.
+  </div>
+  <div style="margin-top: 0.75rem;">
+    <canvas id="coverageChart" class="chart-canvas" height="240"></canvas>
+  </div>
+  <div id="coverageError" class="muted" style="margin-top: 0.5rem;"></div>
+</section>
+
+<section class="panel" style="margin-top: 1rem;">
   <h2>Reports</h2>
   {% if kpi_report %}
     <p>
@@ -82,5 +97,167 @@
     <p class="muted">Run: <code>python3 scripts/generate_kpi_report.py --out docs/KPI_BASELINE.md --update-tracker</code></p>
   {% endif %}
 </section>
+
+<script>
+(function () {
+  function toNumber(x) {
+    if (x === null || x === undefined) return null;
+    const n = Number(x);
+    return Number.isFinite(n) ? n : null;
+  }
+
+  function resizeCanvasToCssPixels(canvas) {
+    const dpr = window.devicePixelRatio || 1;
+    const cssW = Math.max(1, canvas.clientWidth);
+    const cssH = Math.max(1, canvas.getAttribute("height") ? Number(canvas.getAttribute("height")) : canvas.clientHeight);
+    const needW = Math.floor(cssW * dpr);
+    const needH = Math.floor(cssH * dpr);
+    if (canvas.width !== needW || canvas.height !== needH) {
+      canvas.width = needW;
+      canvas.height = needH;
+    }
+    const ctx = canvas.getContext("2d");
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    return { ctx, cssW, cssH };
+  }
+
+  function drawLineChart(canvas, labels, seriesList, opts) {
+    const { ctx, cssW, cssH } = resizeCanvasToCssPixels(canvas);
+    ctx.clearRect(0, 0, cssW, cssH);
+
+    const pad = { l: 46, r: 14, t: 14, b: 28 };
+    const plotW = cssW - pad.l - pad.r;
+    const plotH = cssH - pad.t - pad.b;
+    if (plotW <= 10 || plotH <= 10 || labels.length < 2) return;
+
+    const values = [];
+    for (const s of seriesList) {
+      for (const v of s.data) {
+        if (v !== null) values.push(v);
+      }
+    }
+    if (values.length === 0) return;
+
+    let minV = Math.min(...values);
+    let maxV = Math.max(...values);
+    if (minV === maxV) {
+      minV -= 1;
+      maxV += 1;
+    }
+    const range = maxV - minV;
+    const yMin = minV - range * 0.05;
+    const yMax = maxV + range * 0.05;
+
+    function xFor(i) {
+      return pad.l + (i / (labels.length - 1)) * plotW;
+    }
+    function yFor(v) {
+      const t = (v - yMin) / (yMax - yMin);
+      return pad.t + (1 - t) * plotH;
+    }
+
+    // Grid
+    ctx.strokeStyle = "#e6edf8";
+    ctx.lineWidth = 1;
+    for (let g = 0; g <= 4; g++) {
+      const y = pad.t + (g / 4) * plotH;
+      ctx.beginPath();
+      ctx.moveTo(pad.l, y);
+      ctx.lineTo(pad.l + plotW, y);
+      ctx.stroke();
+    }
+
+    // Axes labels (min/max)
+    ctx.fillStyle = "#5c6a82";
+    ctx.font = "12px IBM Plex Sans, Segoe UI, sans-serif";
+    ctx.textAlign = "left";
+    ctx.textBaseline = "top";
+    ctx.fillText(yMax.toFixed(opts && opts.yDecimals !== undefined ? opts.yDecimals : 2), 8, pad.t);
+    ctx.textBaseline = "bottom";
+    ctx.fillText(yMin.toFixed(opts && opts.yDecimals !== undefined ? opts.yDecimals : 2), 8, pad.t + plotH);
+
+    // Lines
+    for (const s of seriesList) {
+      ctx.strokeStyle = s.color;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      let started = false;
+      for (let i = 0; i < labels.length; i++) {
+        const v = s.data[i];
+        if (v === null) {
+          started = false;
+          continue;
+        }
+        const x = xFor(i);
+        const y = yFor(v);
+        if (!started) {
+          ctx.moveTo(x, y);
+          started = true;
+        } else {
+          ctx.lineTo(x, y);
+        }
+      }
+      ctx.stroke();
+    }
+
+    // X labels (first/last)
+    ctx.fillStyle = "#5c6a82";
+    ctx.font = "12px IBM Plex Sans, Segoe UI, sans-serif";
+    ctx.textBaseline = "top";
+    ctx.textAlign = "left";
+    ctx.fillText(labels[0], pad.l, pad.t + plotH + 8);
+    ctx.textAlign = "right";
+    ctx.fillText(labels[labels.length - 1], pad.l + plotW, pad.t + plotH + 8);
+  }
+
+  async function renderCoverage() {
+    const errorEl = document.getElementById("coverageError");
+    const canvas = document.getElementById("coverageChart");
+    if (!canvas) return;
+
+    try {
+      const resp = await fetch("/api/metrics/cc-cape/series/monthly?limit=720", {
+        headers: { Accept: "application/json" },
+      });
+      if (!resp.ok) {
+        throw new Error("Failed to load monthly series (" + resp.status + ")");
+      }
+      const payload = await resp.json();
+      const series = (payload && payload.series) ? payload.series : [];
+      if (series.length < 2) {
+        errorEl.textContent = "Not enough monthly observations to chart yet.";
+        return;
+      }
+      const labels = series.map((p) => String(p.observation_date || "").slice(0, 10));
+      const pricedPct = series.map((p) => {
+        const priced = toNumber(p.symbols_with_price);
+        const total = toNumber(p.symbols_total);
+        if (!priced || !total) return null;
+        return (priced / total) * 100.0;
+      });
+      const validPct = series.map((p) => {
+        const valid = toNumber(p.symbols_with_valid_cape);
+        const total = toNumber(p.symbols_total);
+        if (!valid || !total) return null;
+        return (valid / total) * 100.0;
+      });
+
+      drawLineChart(canvas, labels, [
+        { name: "Priced %", data: pricedPct, color: "#0b6bcb" },
+        { name: "Valid %", data: validPct, color: "#067647" },
+      ], { yDecimals: 1 });
+      errorEl.textContent = "";
+    } catch (err) {
+      errorEl.textContent = "Coverage chart error: " + (err && err.message ? err.message : String(err));
+    }
+  }
+
+  renderCoverage().catch(function () {});
+  window.addEventListener("resize", function () {
+    clearTimeout(window.__cccapeCoverageResizeTimer);
+    window.__cccapeCoverageResizeTimer = setTimeout(renderCoverage, 150);
+  });
+})();
+</script>
 
 {% endblock %}

@@ -41,6 +41,14 @@ python3 scripts/free_data_pipeline.py --update-tracker
 python3 scripts/calc_cc_cape_free.py --update-tracker
 ```
 
+### Refresh Latest Prices (Bulk Quotes)
+
+If Stooq daily-history backfills are hitting anonymous request limits, you can still refresh the latest closes for most symbols using the quote endpoint (fewer HTTP requests):
+
+```bash
+python3 scripts/fetch_stooq_quotes.py --data-db data/free_data.db
+```
+
 ### Backfill Monthly Series (One-Time / On Demand)
 
 ```bash

@@ -104,6 +104,25 @@ def run_job(args: argparse.Namespace) -> tuple[int, int]:
         calc_cmd.append("--no-update-tracker")
 
     pipeline_code = run_command(pipeline_cmd)
+
+    quotes_code = 0
+    if args.quotes_enabled:
+        quotes_cmd = [
+            sys.executable,
+            str(ROOT_DIR / "scripts" / "fetch_stooq_quotes.py"),
+            "--data-db",
+            args.data_db,
+            "--chunk-size",
+            str(args.quotes_chunk_size),
+            "--request-delay",
+            str(args.quotes_request_delay),
+            "--timeout",
+            str(args.quotes_timeout),
+        ]
+        quotes_code = run_command(quotes_cmd)
+        if quotes_code != 0:
+            log("Quotes refresh failed (non-zero exit); continuing.")
+
     calc_code = run_command(calc_cmd)
 
     series_code = 0
@@ -193,6 +212,15 @@ def main() -> int:
         help="Only fetch prices for symbols missing from the DB (useful for filling gaps quickly).",
     )
     parser.add_argument("--request-delay", type=float, default=float(os.getenv("WEEKLY_REQUEST_DELAY", "0.25")))
+    parser.add_argument(
+        "--quotes-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=(os.getenv("WEEKLY_QUOTES_ENABLED", "true").lower() in {"1", "true", "yes"}),
+        help="Refresh latest Stooq quotes in bulk after ingestion (helps coverage with fewer requests).",
+    )
+    parser.add_argument("--quotes-chunk-size", type=int, default=int(os.getenv("WEEKLY_QUOTES_CHUNK_SIZE", "75")))
+    parser.add_argument("--quotes-request-delay", type=float, default=float(os.getenv("WEEKLY_QUOTES_REQUEST_DELAY", "0.15")))
+    parser.add_argument("--quotes-timeout", type=float, default=float(os.getenv("WEEKLY_QUOTES_TIMEOUT", "30")))
     parser.add_argument("--calc-max-symbols", type=int, default=int(os.getenv("WEEKLY_CALC_MAX_SYMBOLS", "0")))
     parser.add_argument("--min-eps-points", type=int, default=int(os.getenv("WEEKLY_MIN_EPS_POINTS", "8")))
     parser.add_argument("--lookback-years", type=int, default=int(os.getenv("WEEKLY_LOOKBACK_YEARS", "10")))

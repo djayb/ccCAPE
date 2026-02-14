@@ -15,6 +15,7 @@ COPY . /app
 RUN chmod +x /app/internal_jira.py \
     /app/scripts/docker-entrypoint.sh \
     /app/scripts/free_data_pipeline.py \
+    /app/scripts/fetch_stooq_quotes.py \
     /app/scripts/calc_cc_cape_free.py \
     /app/scripts/backfill_cc_cape_series_free.py \
     /app/scripts/import_external_fundamentals_csv.py \

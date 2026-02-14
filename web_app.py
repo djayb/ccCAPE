@@ -500,6 +500,168 @@ def metrics_health(request: Request):
     )
 
 
+@app.get("/metrics/gaps", response_class=HTMLResponse)
+def metrics_gaps(request: Request):
+    with _open_conn() as tracker_conn:
+        user, redirect = _require_login(request, tracker_conn)
+        if redirect:
+            return redirect
+
+    free_conn = _open_free_data_conn()
+    if free_conn is None:
+        return templates.TemplateResponse(
+            "metrics_gaps.html",
+            {
+                "request": request,
+                "user": user,
+                "error": "Free-data DB not found. Run scripts/free_data_pipeline.py first.",
+            },
+        )
+
+    def age_days(date_value: str | None) -> int | None:
+        if not date_value:
+            return None
+        try:
+            parsed = dt.date.fromisoformat(date_value[:10])
+        except ValueError:
+            return None
+        return (dt.datetime.now(dt.timezone.utc).date() - parsed).days
+
+    def age_days_ts(ts_value: str | None) -> int | None:
+        if not ts_value:
+            return None
+        raw = ts_value.strip()
+        if raw.endswith("Z"):
+            raw = raw[:-1] + "+00:00"
+        try:
+            parsed = dt.datetime.fromisoformat(raw)
+        except ValueError:
+            return None
+        return (dt.datetime.now(dt.timezone.utc) - parsed).days
+
+    with free_conn:
+        as_of_row = free_conn.execute("SELECT MAX(as_of_date) AS as_of_date FROM sp500_constituents").fetchone()
+        as_of_date = as_of_row["as_of_date"] if as_of_row else None
+        if not as_of_date:
+            return templates.TemplateResponse(
+                "metrics_gaps.html",
+                {
+                    "request": request,
+                    "user": user,
+                    "error": "No constituents found. Run scripts/free_data_pipeline.py first.",
+                },
+            )
+
+        constituents = free_conn.execute(
+            """
+            SELECT symbol, security, gics_sector, cik
+            FROM sp500_constituents
+            WHERE as_of_date = ?
+            ORDER BY symbol
+            """,
+            (as_of_date,),
+        ).fetchall()
+
+        prices = free_conn.execute(
+            """
+            SELECT symbol, MAX(price_date) AS latest_price_date
+            FROM daily_prices
+            WHERE source = 'stooq'
+            GROUP BY symbol
+            """
+        ).fetchall()
+        latest_price_by_symbol = {row["symbol"]: row["latest_price_date"] for row in prices if row["symbol"]}
+
+        facts = free_conn.execute("SELECT cik, fetched_at FROM company_facts_meta").fetchall()
+        facts_by_cik = {row["cik"]: row["fetched_at"] for row in facts if row["cik"]}
+
+        latest_run_row = None
+        if _table_exists(free_conn, "cc_cape_runs"):
+            latest_run_row = free_conn.execute("SELECT * FROM cc_cape_runs ORDER BY run_id DESC LIMIT 1").fetchone()
+
+        included_symbols: set[str] = set()
+        if latest_run_row and _table_exists(free_conn, "cc_cape_constituent_metrics"):
+            rows = free_conn.execute(
+                "SELECT symbol FROM cc_cape_constituent_metrics WHERE run_id = ?",
+                (latest_run_row["run_id"],),
+            ).fetchall()
+            included_symbols = {r["symbol"] for r in rows if r and r["symbol"]}
+
+    latest_run = dict(latest_run_row) if latest_run_row else None
+
+    rows_out: list[dict[str, Any]] = []
+    with_price = 0
+    with_facts = 0
+    included_in_latest = 0
+    bucket_counts: dict[str, int] = {}
+
+    for c in constituents:
+        symbol = c["symbol"]
+        cik = (c["cik"] or "").strip()
+        latest_price_date = latest_price_by_symbol.get(symbol)
+        facts_fetched_at = facts_by_cik.get(cik) if cik else None
+        in_latest_run = bool(latest_run and symbol in included_symbols)
+
+        if latest_price_date:
+            with_price += 1
+        if facts_fetched_at:
+            with_facts += 1
+        if in_latest_run:
+            included_in_latest += 1
+
+        if in_latest_run:
+            bucket = "included"
+        elif not latest_price_date:
+            bucket = "missing_price"
+        elif not cik:
+            bucket = "missing_cik"
+        elif not facts_fetched_at:
+            bucket = "missing_facts"
+        elif latest_run:
+            bucket = "excluded_from_latest_calc"
+        else:
+            bucket = "not_calculated"
+
+        bucket_counts[bucket] = bucket_counts.get(bucket, 0) + 1
+
+        rows_out.append(
+            {
+                "symbol": symbol,
+                "security": c["security"],
+                "gics_sector": c["gics_sector"],
+                "cik": cik,
+                "latest_price_date": latest_price_date,
+                "price_age_days": age_days(latest_price_date),
+                "facts_fetched_at": facts_fetched_at,
+                "facts_age_days": age_days_ts(facts_fetched_at),
+                "in_latest_run": in_latest_run,
+                "bucket": bucket,
+            }
+        )
+
+    breakdown = [{"bucket": k, "count": bucket_counts[k]} for k in sorted(bucket_counts.keys())]
+    summary = {
+        "total": len(constituents),
+        "with_price": with_price,
+        "with_facts": with_facts,
+        "included_in_latest_run": included_in_latest,
+    }
+
+    return templates.TemplateResponse(
+        "metrics_gaps.html",
+        {
+            "request": request,
+            "user": user,
+            "error": "",
+            "as_of_constituents_date": as_of_date,
+            "latest_run": latest_run,
+            "summary": summary,
+            "breakdown": breakdown,
+            "rows": rows_out,
+        },
+    )
+
+
 def _get_cc_cape_run(free_conn: sqlite3.Connection, run_id: int | None) -> sqlite3.Row | None:
     if run_id is None:
         return free_conn.execute(

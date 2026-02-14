@@ -54,6 +54,10 @@ Purpose: raw ingested datasets + curated computed metrics.
 - `company_facts_values`
   - Key: `(cik, taxonomy, tag, unit, end_date, accession)`
   - Lineage: `fetched_at` (and filing metadata like `form`, `filed_date`)
+  - Notes:
+    - SEC XBRL facts typically use taxonomies like `us-gaap` and `dei`
+    - external / licensed fundamentals can be imported into the same table using a different `taxonomy`
+      (see: `docs/EXTERNAL_FUNDAMENTALS.md`)
 
 - `daily_prices`
   - Key: `(symbol, price_date, source)`
@@ -106,4 +110,3 @@ The UI uses this to display:
 
 - last run status and step summaries
 - freshness/coverage warnings (prices/CPI/Shiller/facts)
-

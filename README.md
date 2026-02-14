@@ -277,3 +277,27 @@ python3 scripts/generate_kpi_report.py --out docs/KPI_BASELINE.md --update-track
 ```
 
 This is also run by the weekly scheduler by default (`WEEKLY_KPI_ENABLED=true`).
+
+## 14. Extend Fundamentals History (Optional)
+
+If you have a fundamentals dataset beyond SEC XBRL coverage (licensed or internal), you can import it into
+`data/free_data.db` so the CC CAPE series can extend further back.
+
+Docs:
+
+- `docs/EXTERNAL_FUNDAMENTALS.md`
+
+Import from CSV:
+
+```bash
+python3 scripts/import_external_fundamentals_csv.py \
+  --csv data/external_fundamentals.csv \
+  --taxonomy external
+```
+
+Optional SimFin bulk adapter:
+
+```bash
+SIMFIN_API_KEY="your_key_here" \
+python3 scripts/import_simfin_bulk.py --taxonomy simfin
+```

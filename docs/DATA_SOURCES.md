@@ -23,6 +23,12 @@ This tool is designed to operate without paid vendor feeds. It uses public/free 
   - automated use must follow SEC fair-access policies
   - require a real `User-Agent` contact string
 
+Optional extension:
+
+- External / licensed fundamentals can be imported into the same storage table (`company_facts_values`) using a
+  dedicated importer script.
+- See: `docs/EXTERNAL_FUNDAMENTALS.md`
+
 ### Inflation (Real Earnings Deflation)
 
 - Source: FRED CPI series `CPIAUCSL`
@@ -60,4 +66,3 @@ Create a short internal memo covering:
 - whether derived datasets will be redistributed
 - acceptable sources and limitations
 - data retention policy
-

@@ -40,6 +40,7 @@ Objectives:
 Deliverables:
 
 - ETL jobs for constituents, prices/market cap, fundamentals, CPI, Shiller CAPE.
+- Optional adapter path for importing external / licensed fundamentals history (to extend beyond SEC XBRL era).
 - Raw and curated database schemas.
 - Data quality dashboard and alerting.
 
